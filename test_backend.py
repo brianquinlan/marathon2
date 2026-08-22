@@ -311,7 +311,7 @@ class TestJinjaMainPageRendering(unittest.TestCase):
         self.assertEqual(resp.status_code, 200)
         self.assertIn("text/html", resp.headers["Content-Type"])
         html = resp.get_data(as_text=True)
-        self.assertIn("Developer Debug Login", html)
+        self.assertIn("Login", html)
         self.assertIn("Sign in with Google", html)
 
     @patch("main.auth.verify_id_token")
@@ -367,7 +367,7 @@ class TestJinjaMainPageRendering(unittest.TestCase):
         html = resp.get_data(as_text=True)
 
         # Verify static ranked task order
-        self.assertIn("Ranked Tasks (2)", html)
+        self.assertIn("Tasks (2)", html)
         self.assertIn("Top Priority Task", html)
         self.assertIn("Lower Priority Task", html)
         self.assertIn("0.95", html)
