@@ -2,10 +2,19 @@ rules_version = '2';
 
 service cloud.firestore {
   match /databases/{database}/documents {
-    // User documents: only accessible directly by the authenticated owner
-    // Backend functions use Firebase Admin SDK which bypasses security rules
+    // User profile document: only accessible directly by the authenticated owner
     match /users/{userId} {
       allow read, write: if request.auth != null && request.auth.uid == userId;
+
+      // User issues subcollection
+      match /issues/{issueId} {
+        allow read, write: if request.auth != null && request.auth.uid == userId;
+      }
+
+      // User tasks subcollection
+      match /tasks/{taskId} {
+        allow read, write: if request.auth != null && request.auth.uid == userId;
+      }
     }
   }
 }

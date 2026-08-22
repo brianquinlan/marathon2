@@ -8,6 +8,7 @@ class User:
     # User-specific application data
     github_access_token: Optional[str] = None
     last_assigned_issue_update_time: Optional[str] = None
+    monitored_repos: List[str] = field(default_factory=list)
 
     # Firebase Authentication & Profile fields
     uid: Optional[str] = None
@@ -43,6 +44,7 @@ class User:
             "linked_providers": self.linked_providers,
             "github_access_token": self.github_access_token,
             "last_assigned_issue_update_time": self.last_assigned_issue_update_time,
+            "monitored_repos": self.monitored_repos,
             "custom_data": self.custom_data,
         }
 
@@ -80,6 +82,7 @@ class User:
             linked_providers=data.get("linked_providers") or [],
             github_access_token=data.get("github_access_token"),
             last_assigned_issue_update_time=data.get("last_assigned_issue_update_time"),
+            monitored_repos=data.get("monitored_repos") or [],
             custom_data=data.get("custom_data") or {},
             created_at=data.get("created_at"),
             updated_at=data.get("updated_at"),
@@ -92,6 +95,7 @@ class User:
         provider_info: Dict[str, Any],
         github_access_token: Optional[str] = None,
         last_assigned_issue_update_time: Optional[str] = None,
+        monitored_repos: Optional[List[str]] = None,
         custom_data: Optional[Dict[str, Any]] = None,
     ) -> "User":
         """
@@ -109,5 +113,6 @@ class User:
             linked_providers=provider_info.get("linked_providers", []),
             github_access_token=github_access_token,
             last_assigned_issue_update_time=last_assigned_issue_update_time,
+            monitored_repos=monitored_repos or [],
             custom_data=custom_data or {},
         )

@@ -75,13 +75,44 @@
           </div>
 
           <div class="landing-content">
+            <!-- Navigation Card -->
             <div class="landing-nav-box">
               <div class="nav-box-icon">⚙️</div>
               <div class="nav-box-info">
                 <h3>User Settings</h3>
-                <p>View and update your stored <code>github_access_token</code> and personal configuration.</p>
+                <p>Configure your <code>github_access_token</code> and <code>monitored_repos</code>.</p>
               </div>
               <button id="btn-goto-settings" class="btn btn-primary">Go to Settings &rarr;</button>
+            </div>
+
+            <!-- Priority Ranked Tasks Section -->
+            <div id="landing-tasks-container" class="tasks-list-section">
+              <div class="section-title-row">
+                <div>
+                  <h4>Tasks by Priority (<span id="tasks-count">0</span>)</h4>
+                  <p class="section-subtext">Ordered from highest to lowest priority (1.0 &rarr; 0.0).</p>
+                </div>
+                <div class="section-action-buttons">
+                  <button id="btn-force-rerank" class="btn btn-primary btn-sm">Force Re-rank All Tasks</button>
+                </div>
+              </div>
+              <div id="tasks-list" class="tasks-list">
+                <p class="empty-state">No tasks created yet. Click "Sync from GitHub" below to generate tasks from your issues.</p>
+              </div>
+            </div>
+
+            <!-- Stored GitHub Issues Section -->
+            <div id="landing-issues-container" class="issues-list-section">
+              <div class="section-title-row">
+                <div>
+                  <h4>Associated GitHub Issues (<span id="issues-count">0</span>)</h4>
+                  <p class="section-subtext">Issues assigned, mentioned, created, or in monitored repos.</p>
+                </div>
+                <button id="btn-sync-issues-landing" class="btn btn-secondary btn-sm">Sync from GitHub</button>
+              </div>
+              <div id="issues-list" class="issues-list">
+                <p class="empty-state">No issues stored yet. Configure your GitHub token and click "Sync from GitHub".</p>
+              </div>
             </div>
           </div>
         </div>
@@ -93,10 +124,11 @@
           <div class="settings-header">
             <button id="btn-back-to-landing" class="btn btn-ghost">&larr; Back to Landing Page</button>
             <h2>Settings</h2>
-            <p class="subtitle">Manage your GitHub Access Token stored in Firestore.</p>
+            <p class="subtitle">Manage your GitHub Access Token and Monitored Repositories stored in Firestore.</p>
           </div>
 
           <div class="settings-form">
+            <!-- GitHub Access Token -->
             <div class="form-group">
               <label for="input-github-token">GitHub Access Token</label>
               <div class="input-with-toggle">
@@ -108,14 +140,25 @@
                 />
                 <button type="button" id="btn-toggle-token-visibility" class="btn-toggle" title="Show/Hide">👁️</button>
               </div>
-              <p class="field-hint">This token is stored securely in your user profile (<code>User.github_access_token</code>).</p>
+              <p class="field-hint">Stored in <code>User.github_access_token</code>.</p>
             </div>
 
             <div class="form-group">
-              <label>Current Value in Firestore</label>
+              <label>Current Token in Firestore</label>
               <div id="current-token-display" class="token-display-box">
                 <span class="placeholder-text">Loading from Firestore...</span>
               </div>
+            </div>
+
+            <!-- Monitored Repositories -->
+            <div class="form-group">
+              <label for="input-monitored-repos">Monitored Repositories</label>
+              <input 
+                type="text" 
+                id="input-monitored-repos" 
+                placeholder="e.g. brianquinlan/marathon2, facebook/react" 
+              />
+              <p class="field-hint">Comma-separated list of GitHub repositories to monitor (<code>User.monitored_repos</code>).</p>
             </div>
 
             <div class="form-group">
@@ -141,8 +184,8 @@
             </div>
 
             <div class="form-actions">
-              <button id="btn-save-token" class="btn btn-primary">Save GitHub Access Token</button>
-              <button id="btn-refresh-user" class="btn btn-secondary">Refresh from Backend</button>
+              <button id="btn-save-settings" class="btn btn-primary">Save Settings</button>
+              <button id="btn-sync-issues-settings" class="btn btn-secondary">Sync GitHub Issues Now</button>
             </div>
           </div>
         </div>

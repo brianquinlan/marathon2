@@ -12,6 +12,7 @@ import {
 import {
   getFirestore,
   doc,
+  collection,
   onSnapshot,
   connectFirestoreEmulator
 } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore.js";
@@ -61,6 +62,8 @@ if (isLocalhost) {
 
 let currentUser = null;
 let userDocUnsubscribe = null;
+let issuesColUnsubscribe = null;
+let tasksColUnsubscribe = null;
 
 // Views
 const viewLogin = document.getElementById("view-login");
@@ -82,22 +85,29 @@ const btnLoginGithub = document.getElementById("btn-login-github");
 const landingUserName = document.getElementById("landing-user-name");
 const landingProviderName = document.getElementById("landing-provider-name");
 const btnGotoSettings = document.getElementById("btn-goto-settings");
+const btnSyncIssuesLanding = document.getElementById("btn-sync-issues-landing");
+const btnForceRerank = document.getElementById("btn-force-rerank");
+const tasksCount = document.getElementById("tasks-count");
+const tasksList = document.getElementById("tasks-list");
+const issuesCount = document.getElementById("issues-count");
+const issuesList = document.getElementById("issues-list");
 
 // Settings elements
 const btnBackToLanding = document.getElementById("btn-back-to-landing");
 const inputGithubToken = document.getElementById("input-github-token");
 const btnToggleTokenVisibility = document.getElementById("btn-toggle-token-visibility");
 const currentTokenDisplay = document.getElementById("current-token-display");
+const inputMonitoredRepos = document.getElementById("input-monitored-repos");
 const metaUid = document.getElementById("meta-uid");
 const metaEmail = document.getElementById("meta-email");
 const metaProvider = document.getElementById("meta-provider");
 const metaIssueTime = document.getElementById("meta-issue-time");
-const btnSaveToken = document.getElementById("btn-save-token");
-const btnRefreshUser = document.getElementById("btn-refresh-user");
+const btnSaveSettings = document.getElementById("btn-save-settings");
+const btnSyncIssuesSettings = document.getElementById("btn-sync-issues-settings");
 const toastContainer = document.getElementById("toast-container");
 
 // ============================================================================
-// 3. View Routing Helper
+// 3. View Routing & Toast Helpers
 // ============================================================================
 
 function switchView(activeSection) {
@@ -119,15 +129,19 @@ function showToast(message, type = "success") {
   }, 3500);
 }
 
+function escapeHtml(str) {
+  if (!str) return "";
+  return String(str).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
+}
+
 // ============================================================================
-// 4. Authentication & User State
+// 4. Authentication & Real-time Subscriptions
 // ============================================================================
 
 onAuthStateChanged(auth, async (user) => {
   currentUser = user;
 
   if (user) {
-    // Determine provider name
     const providerId = user.providerData?.[0]?.providerId || "unknown";
     const isGithub = providerId.includes("github");
     const providerName = isGithub ? "GitHub" : "Google";
@@ -156,22 +170,32 @@ onAuthStateChanged(auth, async (user) => {
       console.log("Auto-sync info:", e.message);
     }
 
-    // Subscribe live to Firestore User Document (users/{uid})
+    // Subscribe live to Firestore User Document, Issues, and Tasks
     subscribeToUserDoc(user.uid);
+    subscribeToIssues(user.uid);
+    subscribeToTasks(user.uid);
 
     switchView(viewLanding);
   } else {
-    // Clean up
+    // Clean up subscriptions
     if (userDocUnsubscribe) {
       userDocUnsubscribe();
       userDocUnsubscribe = null;
+    }
+    if (issuesColUnsubscribe) {
+      issuesColUnsubscribe();
+      issuesColUnsubscribe = null;
+    }
+    if (tasksColUnsubscribe) {
+      tasksColUnsubscribe();
+      tasksColUnsubscribe = null;
     }
     navUserProfile.classList.add("hidden");
     switchView(viewLogin);
   }
 });
 
-// Real-time Firestore Document Listener
+// Real-time Firestore Document Listener for User Profile
 function subscribeToUserDoc(uid) {
   if (userDocUnsubscribe) {
     userDocUnsubscribe();
@@ -184,7 +208,6 @@ function subscribeToUserDoc(uid) {
       const token = data.github_access_token;
       
       if (token) {
-        // Mask token for security in display
         const masked = token.length > 8 
           ? token.substring(0, 4) + "•".repeat(token.length - 8) + token.substring(token.length - 4)
           : "••••••••";
@@ -195,20 +218,223 @@ function subscribeToUserDoc(uid) {
         currentTokenDisplay.classList.add("placeholder-text");
       }
 
-      // Update issue timestamp
-      metaIssueTime.textContent = data.last_assigned_issue_update_time || "None";
-    } else {
-      currentTokenDisplay.textContent = "No Firestore document yet";
-      currentTokenDisplay.classList.add("placeholder-text");
+      const repos = data.monitored_repos || [];
+      if (document.activeElement !== inputMonitoredRepos) {
+        inputMonitoredRepos.value = repos.join(", ");
+      }
+
+      metaIssueTime.textContent = data.last_assigned_issue_update_time || "Never synced";
     }
   }, (err) => {
-    console.error("Firestore subscription error:", err);
+    console.error("Firestore user subscription error:", err);
+  });
+}
+
+// Real-time Firestore Subcollection Listener for Issues (users/{uid}/issues)
+function subscribeToIssues(uid) {
+  if (issuesColUnsubscribe) {
+    issuesColUnsubscribe();
+  }
+
+  const issuesColRef = collection(firestore, "users", uid, "issues");
+  issuesColUnsubscribe = onSnapshot(issuesColRef, (snapshot) => {
+    const issues = [];
+    snapshot.forEach(docSnap => {
+      issues.push(docSnap.data());
+    });
+    renderIssuesList(issues);
+  }, (err) => {
+    console.error("Firestore issues subscription error:", err);
+  });
+}
+
+// Real-time Firestore Subcollection Listener for Tasks (users/{uid}/tasks)
+function subscribeToTasks(uid) {
+  if (tasksColUnsubscribe) {
+    tasksColUnsubscribe();
+  }
+
+  const tasksColRef = collection(firestore, "users", uid, "tasks");
+  tasksColUnsubscribe = onSnapshot(tasksColRef, (snapshot) => {
+    const tasks = [];
+    snapshot.forEach(docSnap => {
+      tasks.push(docSnap.data());
+    });
+    
+    // Sort from HIGHEST to LOWEST priority (1.0 -> 0.0)
+    tasks.sort((a, b) => {
+      const pA = typeof a.priority === "number" ? a.priority : 0.0;
+      const pB = typeof b.priority === "number" ? b.priority : 0.0;
+      return pB - pA;
+    });
+
+    renderTasksList(tasks);
+  }, (err) => {
+    console.error("Firestore tasks subscription error:", err);
+  });
+}
+
+// Render Task Cards ordered from highest to lowest priority
+function renderTasksList(tasks) {
+  tasksCount.textContent = tasks.length;
+
+  if (tasks.length === 0) {
+    tasksList.innerHTML = `<p class="empty-state">No tasks created yet. Click "Sync from GitHub" below to generate tasks for your issues.</p>`;
+    return;
+  }
+
+  tasksList.innerHTML = "";
+
+  tasks.forEach((task, index) => {
+    const card = document.createElement("div");
+    card.className = "task-card";
+
+    const needsUpdate = task.priority_needs_updated === true;
+    const statusBadgeClass = needsUpdate ? "badge-needs-rank" : "badge-ranked";
+    const statusBadgeText = needsUpdate ? "Needs Rerank" : "Ranked";
+    
+    const rawPriority = typeof task.priority === "number" ? task.priority : 0.0;
+    const priorityVal = rawPriority.toFixed(2);
+    const meterPercent = Math.min(100, Math.max(0, Math.round(rawPriority * 100)));
+
+    const rankNum = `#${index + 1}`;
+    const issueRefText = task.issue_id ? task.issue_id.replace(/_/g, " / ") : "Issue";
+
+    card.innerHTML = `
+      <div class="task-card-header">
+        <div class="task-rank-title-group">
+          <span class="task-rank-number" title="Priority Rank">${rankNum}</span>
+          <a href="${task.issue_url || '#'}" target="_blank" rel="noopener noreferrer" class="task-title">
+            ${escapeHtml(task.title || task.issue_id || "Untitled Task")}
+          </a>
+        </div>
+        <div class="task-badge-group">
+          <div class="priority-tag">
+            <span class="priority-label">Priority</span>
+            <span class="priority-value">${priorityVal}</span>
+          </div>
+          <span class="status-badge ${statusBadgeClass}">${statusBadgeText}</span>
+        </div>
+      </div>
+      
+      <div class="priority-meter-container" title="Priority: ${priorityVal}">
+        <div class="priority-meter-fill" style="width: ${meterPercent}%;"></div>
+      </div>
+
+      <div class="task-card-footer">
+        <span class="task-issue-ref">${escapeHtml(issueRefText)}</span>
+        <span>${needsUpdate ? "⚠️ Re-rank required" : "✓ Priority up to date"}</span>
+      </div>
+    `;
+
+    tasksList.appendChild(card);
+  });
+}
+
+// Render Issue Cards
+function renderIssuesList(issues) {
+  issuesCount.textContent = issues.length;
+
+  if (issues.length === 0) {
+    issuesList.innerHTML = `<p class="empty-state">No issues stored in Firestore yet. Configure your GitHub token and click "Sync from GitHub".</p>`;
+    return;
+  }
+
+  issuesList.innerHTML = "";
+
+  issues.forEach(issue => {
+    const card = document.createElement("div");
+    card.className = "issue-card";
+
+    const reasons = issue.association_reasons || ["assigned"];
+    const badgesHtml = reasons.map(r => {
+      const label = r.replace("_", " ");
+      return `<span class="reason-badge reason-${r}">${label}</span>`;
+    }).join("");
+
+    const commentsCount = (issue.comments || []).length;
+    const isPR = issue.issue_type === "pull_request";
+    const typeIcon = isPR ? "🔀" : "🟢";
+
+    card.innerHTML = `
+      <div class="issue-card-top">
+        <div>
+          <span class="issue-repo-num">${typeIcon} ${issue.owner}/${issue.repo} #${issue.issue_number}</span>
+          <div>
+            <a href="${issue.url}" target="_blank" rel="noopener noreferrer" class="issue-title-link">
+              ${escapeHtml(issue.title || "Untitled Issue")}
+            </a>
+          </div>
+        </div>
+        <div class="reason-badges">
+          ${badgesHtml}
+        </div>
+      </div>
+      <div class="issue-card-bottom">
+        <span>Author: <strong>@${escapeHtml(issue.user_login || "unknown")}</strong></span>
+        <span>💬 ${commentsCount} comments</span>
+      </div>
+    `;
+
+    issuesList.appendChild(card);
   });
 }
 
 // ============================================================================
-// 5. User Actions & Event Listeners
+// 5. Actions & Cloud Function Handlers
 // ============================================================================
+
+// Sync GitHub Issues
+async function triggerIssueSync() {
+  if (!currentUser) return;
+
+  const btnSyncs = [btnSyncIssuesLanding, btnSyncIssuesSettings];
+  btnSyncs.forEach(b => {
+    if (b) {
+      b.disabled = true;
+      b.textContent = "Syncing...";
+    }
+  });
+
+  try {
+    const syncFn = httpsCallable(functions, "sync_github_issues");
+    const result = await syncFn({ state: "open" });
+    const count = result.data.initial_queues_count || 0;
+    showToast(`GitHub sync started in background (${count} queues dispatched)!`);
+  } catch (err) {
+    console.error("Error syncing issues:", err);
+    showToast(`Sync failed: ${err.message}`, "error");
+  } finally {
+    if (btnSyncIssuesLanding) {
+      btnSyncIssuesLanding.disabled = false;
+      btnSyncIssuesLanding.textContent = "Sync from GitHub";
+    }
+    if (btnSyncIssuesSettings) {
+      btnSyncIssuesSettings.disabled = false;
+      btnSyncIssuesSettings.textContent = "Sync GitHub Issues Now";
+    }
+  }
+}
+
+// Force Re-rank All Tasks
+btnForceRerank.addEventListener("click", async () => {
+  if (!currentUser) return;
+
+  btnForceRerank.disabled = true;
+  btnForceRerank.textContent = "Enqueuing Re-rank...";
+
+  try {
+    const forceFn = httpsCallable(functions, "force_rerank_all_tasks");
+    const result = await forceFn();
+    showToast("Forced re-rank enqueued in background.");
+  } catch (err) {
+    console.error("Error forcing rerank:", err);
+    showToast(`Forced rerank failed: ${err.message}`, "error");
+  } finally {
+    btnForceRerank.disabled = false;
+    btnForceRerank.textContent = "Force Re-rank All Tasks";
+  }
+});
 
 // Sign In With Google
 btnLoginGoogle.addEventListener("click", async () => {
@@ -217,7 +443,6 @@ btnLoginGoogle.addEventListener("click", async () => {
     await signInWithPopup(auth, provider);
     showToast("Signed in with Google successfully!");
   } catch (err) {
-    console.error("Google sign in error:", err);
     showToast(`Google Sign In failed: ${err.message}`, "error");
   }
 });
@@ -230,25 +455,20 @@ btnLoginGithub.addEventListener("click", async () => {
     provider.addScope("read:user");
     
     const result = await signInWithPopup(auth, provider);
-    
-    // Automatically capture GitHub access token from OAuth result if provided
     const credential = GithubAuthProvider.credentialFromResult(result);
     const token = credential?.accessToken;
     
     if (token) {
       inputGithubToken.value = token;
-      // Associate automatically
       const associateFn = httpsCallable(functions, "associate_user_info");
       await associateFn({
         github_access_token: token,
-        last_assigned_issue_update_time: new Date().toISOString()
       });
-      showToast("Signed in with GitHub and associated GitHub token!");
+      showToast("Signed in with GitHub and saved GitHub access token!");
     } else {
       showToast("Signed in with GitHub successfully!");
     }
   } catch (err) {
-    console.error("GitHub sign in error:", err);
     showToast(`GitHub Sign In failed: ${err.message}`, "error");
   }
 });
@@ -263,17 +483,11 @@ btnLogout.addEventListener("click", async () => {
   }
 });
 
-// Navigation: Landing -> Settings
-btnGotoSettings.addEventListener("click", () => {
-  switchView(viewSettings);
-});
+// Navigation
+btnGotoSettings.addEventListener("click", () => switchView(viewSettings));
+btnBackToLanding.addEventListener("click", () => switchView(viewLanding));
 
-// Navigation: Settings -> Landing
-btnBackToLanding.addEventListener("click", () => {
-  switchView(viewLanding);
-});
-
-// Toggle password visibility for token input
+// Token Visibility Toggle
 btnToggleTokenVisibility.addEventListener("click", () => {
   if (inputGithubToken.type === "password") {
     inputGithubToken.type = "text";
@@ -284,54 +498,38 @@ btnToggleTokenVisibility.addEventListener("click", () => {
   }
 });
 
-// Save GitHub Access Token via Cloud Function
-btnSaveToken.addEventListener("click", async () => {
+// Save Settings
+btnSaveSettings.addEventListener("click", async () => {
   if (!currentUser) return;
 
   const newToken = inputGithubToken.value.trim();
-  if (!newToken) {
-    showToast("Please enter a GitHub Access Token.", "error");
-    return;
-  }
+  const rawRepos = inputMonitoredRepos.value.trim();
+  const repoList = rawRepos ? rawRepos.split(",").map(r => r.trim()).filter(Boolean) : [];
 
-  btnSaveToken.disabled = true;
-  btnSaveToken.textContent = "Saving...";
+  btnSaveSettings.disabled = true;
+  btnSaveSettings.textContent = "Saving...";
 
   try {
+    const payload = {
+      monitored_repos: repoList,
+    };
+    if (newToken) {
+      payload.github_access_token = newToken;
+    }
+
     const associateFn = httpsCallable(functions, "associate_user_info");
-    const response = await associateFn({
-      github_access_token: newToken,
-      last_assigned_issue_update_time: new Date().toISOString(),
-    });
+    await associateFn(payload);
 
-    console.log("Backend response:", response.data);
-    showToast("GitHub Access Token saved successfully!");
-    inputGithubToken.value = "";
+    showToast("Settings saved successfully!");
+    if (newToken) inputGithubToken.value = "";
   } catch (err) {
-    console.error("Error saving token:", err);
-    showToast(`Failed to save token: ${err.message}`, "error");
+    showToast(`Save failed: ${err.message}`, "error");
   } finally {
-    btnSaveToken.disabled = false;
-    btnSaveToken.textContent = "Save GitHub Access Token";
+    btnSaveSettings.disabled = false;
+    btnSaveSettings.textContent = "Save Settings";
   }
 });
 
-// Refresh from Backend
-btnRefreshUser.addEventListener("click", async () => {
-  if (!currentUser) return;
-
-  btnRefreshUser.disabled = true;
-  btnRefreshUser.textContent = "Fetching...";
-
-  try {
-    const getInfoFn = httpsCallable(functions, "get_user_info");
-    const res = await getInfoFn();
-    console.log("Fetched User from Backend:", res.data);
-    showToast("Refreshed user state from backend.");
-  } catch (err) {
-    showToast(`Refresh error: ${err.message}`, "error");
-  } finally {
-    btnRefreshUser.disabled = false;
-    btnRefreshUser.textContent = "Refresh from Backend";
-  }
-});
+// Sync Issue Buttons
+btnSyncIssuesLanding.addEventListener("click", triggerIssueSync);
+btnSyncIssuesSettings.addEventListener("click", triggerIssueSync);
