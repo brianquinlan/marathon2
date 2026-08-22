@@ -13,7 +13,7 @@ import json
 import logging
 import re
 
-from firebase_functions import https_fn, tasks_fn, scheduler_fn, options
+from firebase_functions import https_fn, tasks_fn, scheduler_fn, firestore_fn, options
 import firebase_admin
 from firebase_admin import credentials, firestore, auth
 
@@ -804,4 +804,60 @@ def scheduled_sync_closed_issues(event: scheduler_fn.ScheduledEvent) -> None:
     logger.info("Starting scheduled 5-minute sync for closed GitHub issues.")
     res = sync_all_users_closed_issues(db=db)
     logger.info(f"Completed scheduled sync for closed issues: {res}")
+
+
+# ============================================================================
+# Cloud Firestore Triggers: Auto-Sync on User Settings Creation or Change
+# ============================================================================
+
+@firestore_fn.on_document_written(document="users/{uid}")
+def on_user_settings_changed(
+    event: firestore_fn.Event[firestore_fn.Change[firestore_fn.DocumentSnapshot | None]]
+) -> None:
+    """
+    Cloud Firestore trigger that invokes start_user_github_sync if the user's
+    settings (github_access_token or monitored_repos) are newly created or changed.
+    """
+    if event.data is None or event.data.after is None:
+        logger.info("User document was deleted; skipping GitHub sync.")
+        return
+
+    after_snap = event.data.after
+    before_snap = event.data.before
+
+    # If document does not exist after write, do nothing
+    if hasattr(after_snap, "exists") and not after_snap.exists:
+        logger.info("User document does not exist after write; skipping.")
+        return
+
+    after_data = after_snap.to_dict() or {}
+    before_data = {}
+    is_new = (before_snap is None) or (hasattr(before_snap, "exists") and not before_snap.exists)
+    if not is_new and before_snap is not None:
+        before_data = before_snap.to_dict() or {}
+
+    after_token = after_data.get("github_access_token")
+    before_token = before_data.get("github_access_token")
+
+    after_repos = sorted(after_data.get("monitored_repos") or [])
+    before_repos = sorted(before_data.get("monitored_repos") or [])
+
+    if not after_token:
+        logger.info(f"User {event.params.get('uid')} has no github_access_token configured; skipping sync.")
+        return
+
+    token_changed = after_token != before_token
+    repos_changed = after_repos != before_repos
+
+    if is_new or token_changed or repos_changed:
+        uid = event.params.get("uid")
+        logger.info(
+            f"User settings created/changed for UID {uid} "
+            f"(is_new={is_new}, token_changed={token_changed}, repos_changed={repos_changed}). "
+            f"Triggering background GitHub sync."
+        )
+        user = User.from_dict(after_data, uid=uid)
+        start_user_github_sync(user=user, db=db, state="open")
+
+
 

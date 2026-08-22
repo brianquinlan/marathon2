@@ -464,5 +464,142 @@ class TestJinjaSettingsPageCRUD(unittest.TestCase):
         mock_user_doc.set.assert_called_once()
 
 
+class TestFirestoreUserSettingsTrigger(unittest.TestCase):
+
+    @patch("main.start_user_github_sync")
+    @patch("main.db")
+    def test_trigger_invoked_when_settings_newly_created(self, mock_db, mock_start_sync):
+        handler = get_callable_handler(main.on_user_settings_changed)
+
+        mock_event = MagicMock()
+        mock_event.params = {"uid": "user_new_trig_0"}
+
+        # Document didn't exist before
+        mock_before = None
+
+        mock_after = MagicMock()
+        mock_after.exists = True
+        mock_after.to_dict.return_value = {
+            "github_access_token": "ghp_brand_new_token_123",
+            "monitored_repos": ["brianquinlan/marathon2"]
+        }
+
+        mock_event.data.before = mock_before
+        mock_event.data.after = mock_after
+
+        handler(mock_event)
+        mock_start_sync.assert_called_once()
+        call_user = mock_start_sync.call_args[1]["user"]
+        self.assertEqual(call_user.uid, "user_new_trig_0")
+        self.assertEqual(call_user.github_access_token, "ghp_brand_new_token_123")
+        self.assertEqual(call_user.monitored_repos, ["brianquinlan/marathon2"])
+
+    @patch("main.start_user_github_sync")
+    @patch("main.db")
+    def test_trigger_invoked_when_token_changed(self, mock_db, mock_start_sync):
+        handler = get_callable_handler(main.on_user_settings_changed)
+
+        mock_event = MagicMock()
+        mock_event.params = {"uid": "user_trig_1"}
+
+        mock_before = MagicMock()
+        mock_before.to_dict.return_value = {
+            "github_access_token": "ghp_old_token",
+            "monitored_repos": ["org/repo"]
+        }
+
+        mock_after = MagicMock()
+        mock_after.to_dict.return_value = {
+            "github_access_token": "ghp_new_token",
+            "monitored_repos": ["org/repo"]
+        }
+
+        mock_event.data.before = mock_before
+        mock_event.data.after = mock_after
+
+        handler(mock_event)
+        mock_start_sync.assert_called_once()
+        call_user = mock_start_sync.call_args[1]["user"]
+        self.assertEqual(call_user.uid, "user_trig_1")
+        self.assertEqual(call_user.github_access_token, "ghp_new_token")
+
+    @patch("main.start_user_github_sync")
+    @patch("main.db")
+    def test_trigger_invoked_when_monitored_repos_changed(self, mock_db, mock_start_sync):
+        handler = get_callable_handler(main.on_user_settings_changed)
+
+        mock_event = MagicMock()
+        mock_event.params = {"uid": "user_trig_2"}
+
+        mock_before = MagicMock()
+        mock_before.to_dict.return_value = {
+            "github_access_token": "ghp_token_same",
+            "monitored_repos": ["org/repo1"]
+        }
+
+        mock_after = MagicMock()
+        mock_after.to_dict.return_value = {
+            "github_access_token": "ghp_token_same",
+            "monitored_repos": ["org/repo1", "org/repo2"]
+        }
+
+        mock_event.data.before = mock_before
+        mock_event.data.after = mock_after
+
+        handler(mock_event)
+        mock_start_sync.assert_called_once()
+
+    @patch("main.start_user_github_sync")
+    @patch("main.db")
+    def test_trigger_skipped_when_settings_unchanged(self, mock_db, mock_start_sync):
+        handler = get_callable_handler(main.on_user_settings_changed)
+
+        mock_event = MagicMock()
+        mock_event.params = {"uid": "user_trig_3"}
+
+        # Only last_assigned_issue_update_time changed
+        mock_before = MagicMock()
+        mock_before.to_dict.return_value = {
+            "github_access_token": "ghp_token_same",
+            "monitored_repos": ["org/repo1"],
+            "last_assigned_issue_update_time": "2026-08-22T00:00:00Z"
+        }
+
+        mock_after = MagicMock()
+        mock_after.to_dict.return_value = {
+            "github_access_token": "ghp_token_same",
+            "monitored_repos": ["org/repo1"],
+            "last_assigned_issue_update_time": "2026-08-22T01:00:00Z"
+        }
+
+        mock_event.data.before = mock_before
+        mock_event.data.after = mock_after
+
+        handler(mock_event)
+        mock_start_sync.assert_not_called()
+
+    @patch("main.start_user_github_sync")
+    @patch("main.db")
+    def test_trigger_skipped_when_token_is_missing(self, mock_db, mock_start_sync):
+        handler = get_callable_handler(main.on_user_settings_changed)
+
+        mock_event = MagicMock()
+        mock_event.params = {"uid": "user_trig_4"}
+
+        mock_before = MagicMock()
+        mock_before.to_dict.return_value = {}
+
+        mock_after = MagicMock()
+        mock_after.to_dict.return_value = {
+            "monitored_repos": ["org/repo1"]
+        }
+
+        mock_event.data.before = mock_before
+        mock_event.data.after = mock_after
+
+        handler(mock_event)
+        mock_start_sync.assert_not_called()
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
