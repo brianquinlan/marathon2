@@ -297,5 +297,172 @@ class TestScheduledFunctions(unittest.TestCase):
         mock_sync_all.assert_called_once_with(db=mock_db)
 
 
+class TestJinjaMainPageRendering(unittest.TestCase):
+
+    def test_render_main_page_unauthenticated(self):
+        handler = get_callable_handler(main.render_main_page)
+        mock_req = MagicMock()
+        mock_req.method = "GET"
+        mock_req.cookies = {}
+        mock_req.args = {}
+        mock_req.headers = {}
+
+        resp = handler(mock_req)
+        self.assertEqual(resp.status_code, 200)
+        self.assertIn("text/html", resp.headers["Content-Type"])
+        html = resp.get_data(as_text=True)
+        self.assertIn("Developer Debug Login", html)
+        self.assertIn("Sign in with Google", html)
+
+    @patch("main.auth.verify_id_token")
+    @patch("main.db")
+    def test_render_main_page_authenticated_renders_ranked_tasks(self, mock_db, mock_verify):
+        mock_verify.return_value = {
+            "uid": "user_jinja_1",
+            "email": "tester@example.com",
+            "name": "Tester Dev"
+        }
+
+        # Mock user document
+        mock_user_doc = MagicMock()
+        mock_user_snap = MagicMock()
+        mock_user_snap.exists = True
+        mock_user_snap.to_dict.return_value = {
+            "display_name": "Tester Dev",
+            "email": "tester@example.com"
+        }
+        mock_user_doc.get.return_value = mock_user_snap
+
+        # Mock tasks collection
+        mock_tasks_col = MagicMock()
+        mock_task1 = MagicMock()
+        mock_task1.to_dict.return_value = {
+            "title": "Lower Priority Task",
+            "priority": 0.30,
+            "issue_url": "https://github.com/org/repo/issues/1",
+            "priority_needs_updated": False
+        }
+        mock_task2 = MagicMock()
+        mock_task2.to_dict.return_value = {
+            "title": "Top Priority Task",
+            "priority": 0.95,
+            "issue_url": "https://github.com/org/repo/issues/2",
+            "priority_needs_updated": True
+        }
+        mock_tasks_col.stream.return_value = [mock_task1, mock_task2]
+
+        mock_db.collection.return_value.document.return_value = mock_user_doc
+        mock_user_doc.collection.return_value = mock_tasks_col
+
+        handler = get_callable_handler(main.render_main_page)
+        mock_req = MagicMock()
+        mock_req.method = "GET"
+        mock_req.cookies = {"__session": "mock_id_token_123"}
+        mock_req.args = {}
+        mock_req.headers = {}
+
+        resp = handler(mock_req)
+        self.assertEqual(resp.status_code, 200)
+        self.assertIn("text/html", resp.headers["Content-Type"])
+        html = resp.get_data(as_text=True)
+
+        # Verify static ranked task order
+        self.assertIn("Ranked Tasks (2)", html)
+        self.assertIn("Top Priority Task", html)
+        self.assertIn("Lower Priority Task", html)
+        self.assertIn("0.95", html)
+        self.assertIn("0.30", html)
+        self.assertIn("Needs Rerank", html)
+        self.assertIn("Ranked", html)
+        self.assertIn("/settings", html)
+
+        # Check Top Priority comes first in rendered HTML
+        idx_top = html.find("Top Priority Task")
+        idx_lower = html.find("Lower Priority Task")
+        self.assertTrue(idx_top < idx_lower, "Top priority task should appear before lower priority task")
+
+
+class TestJinjaSettingsPageCRUD(unittest.TestCase):
+
+    def test_render_settings_page_unauthenticated_redirects(self):
+        handler = get_callable_handler(main.render_settings_page)
+        mock_req = MagicMock()
+        mock_req.method = "GET"
+        mock_req.cookies = {}
+        mock_req.args = {}
+        mock_req.headers = {}
+
+        resp = handler(mock_req)
+        self.assertEqual(resp.status_code, 302)
+        self.assertEqual(resp.headers["Location"], "/")
+
+    @patch("main.auth.verify_id_token")
+    @patch("main.db")
+    def test_render_settings_page_get_authenticated(self, mock_db, mock_verify):
+        mock_verify.return_value = {
+            "uid": "user_settings_1",
+            "email": "dev@test.com"
+        }
+
+        mock_user_doc = MagicMock()
+        mock_user_snap = MagicMock()
+        mock_user_snap.exists = True
+        mock_user_snap.to_dict.return_value = {
+            "github_access_token": "ghp_secret12345678",
+            "monitored_repos": ["brianquinlan/marathon2", "google/jax"]
+        }
+        mock_user_doc.get.return_value = mock_user_snap
+        mock_db.collection.return_value.document.return_value = mock_user_doc
+
+        handler = get_callable_handler(main.render_settings_page)
+        mock_req = MagicMock()
+        mock_req.method = "GET"
+        mock_req.cookies = {"__session": "valid_token"}
+        mock_req.args = {}
+        mock_req.headers = {}
+
+        resp = handler(mock_req)
+        self.assertEqual(resp.status_code, 200)
+        html = resp.get_data(as_text=True)
+        self.assertIn("<h2>Settings</h2>", html)
+        self.assertIn("brianquinlan/marathon2, google/jax", html)
+        self.assertIn('value="ghp_secret12345678"', html)
+
+    @patch("main.auth.verify_id_token")
+    @patch("main.db")
+    def test_render_settings_page_post_updates_and_renders_saved(self, mock_db, mock_verify):
+        mock_verify.return_value = {
+            "uid": "user_settings_2",
+            "email": "dev2@test.com"
+        }
+
+        mock_user_doc = MagicMock()
+        mock_user_snap = MagicMock()
+        mock_user_snap.exists = True
+        mock_user_snap.to_dict.return_value = {
+            "github_access_token": "ghp_new_updated_token_999",
+            "monitored_repos": ["org/new-repo"]
+        }
+        mock_user_doc.get.return_value = mock_user_snap
+        mock_db.collection.return_value.document.return_value = mock_user_doc
+
+        handler = get_callable_handler(main.render_settings_page)
+        mock_req = MagicMock()
+        mock_req.method = "POST"
+        mock_req.cookies = {"__session": "valid_token"}
+        mock_req.args = {}
+        mock_req.headers = {}
+        mock_req.form = {
+            "github_access_token": "ghp_new_updated_token_999",
+            "monitored_repos": "org/new-repo"
+        }
+
+        resp = handler(mock_req)
+        self.assertEqual(resp.status_code, 200)
+        html = resp.get_data(as_text=True)
+        self.assertIn("Settings updated successfully", html)
+        mock_user_doc.set.assert_called_once()
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

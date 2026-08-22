@@ -44,11 +44,173 @@ from task import (
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
+import os
+import jinja2
+
+# Jinja2 Environment for server-side HTML rendering
+TEMPLATES_DIR = os.path.join(os.path.dirname(__file__), "templates")
+jinja_env = jinja2.Environment(
+    loader=jinja2.FileSystemLoader(TEMPLATES_DIR),
+    autoescape=jinja2.select_autoescape(["html", "xml"])
+)
+
 # Initialize Firebase Admin App if not already initialized
 if not firebase_admin._apps:
     firebase_admin.initialize_app()
 
 db = firestore.client()
+
+
+# ============================================================================
+# Jinja2 Server-Rendered Main Page (Static Ranked Tasks)
+# ============================================================================
+
+@https_fn.on_request(
+    cors=options.CorsOptions(cors_origins="*", cors_methods=["get", "options"])
+)
+def render_main_page(req: https_fn.Request) -> https_fn.Response:
+    """
+    Renders the static ranked tasks list for developer debugging using Jinja2 templates.
+    Authenticates the user via __session cookie, Authorization header, or ?token= param.
+    """
+    if req.method == "OPTIONS":
+        return https_fn.Response("", status=204)
+
+    token_str = (
+        req.cookies.get("__session")
+        or req.args.get("token")
+    )
+    if not token_str and req.headers.get("Authorization"):
+        auth_hdr = req.headers.get("Authorization", "")
+        if auth_hdr.startswith("Bearer "):
+            token_str = auth_hdr.split("Bearer ", 1)[1].strip()
+
+    decoded_token = None
+    if token_str:
+        try:
+            decoded_token = auth.verify_id_token(token_str)
+        except Exception as e:
+            logger.debug(f"ID token verification failed or expired: {e}")
+
+    template = jinja_env.get_template("main.html")
+
+    if not decoded_token:
+        html = template.render(
+            is_authenticated=False,
+            user=None,
+            tasks=[]
+        )
+        return https_fn.Response(html, status=200, headers={"Content-Type": "text/html; charset=utf-8"})
+
+    uid = decoded_token.get("uid")
+    # Fetch user details
+    user_doc = db.collection("users").document(uid).get()
+    user_data = user_doc.to_dict() if user_doc.exists else {}
+    if not user_data:
+        user_data = {
+            "uid": uid,
+            "email": decoded_token.get("email"),
+            "display_name": decoded_token.get("name")
+        }
+
+    # Fetch tasks from users/{uid}/tasks
+    tasks_col = db.collection("users").document(uid).collection("tasks")
+    tasks_docs = tasks_col.stream()
+    tasks_list = []
+    for doc in tasks_docs:
+        t_data = doc.to_dict() or {}
+        tasks_list.append(t_data)
+
+    # Sort descending from highest to lowest priority
+    tasks_list.sort(key=lambda t: float(t.get("priority") or 0.0), reverse=True)
+
+    html = template.render(
+        is_authenticated=True,
+        user=user_data,
+        tasks=tasks_list
+    )
+    return https_fn.Response(html, status=200, headers={"Content-Type": "text/html; charset=utf-8"})
+
+
+# ============================================================================
+# Jinja2 Server-Rendered Settings Page (Simple CRUD)
+# ============================================================================
+
+@https_fn.on_request(
+    cors=options.CorsOptions(cors_origins="*", cors_methods=["get", "post", "options"])
+)
+def render_settings_page(req: https_fn.Request) -> https_fn.Response:
+    """
+    Simple server-side CRUD settings page for configuring GitHub access token and monitored repos.
+    - GET /settings: Renders settings form.
+    - POST /settings: Updates User in Firestore and displays success message.
+    """
+    if req.method == "OPTIONS":
+        return https_fn.Response("", status=204)
+
+    token_str = (
+        req.cookies.get("__session")
+        or req.args.get("token")
+    )
+    if not token_str and req.headers.get("Authorization"):
+        auth_hdr = req.headers.get("Authorization", "")
+        if auth_hdr.startswith("Bearer "):
+            token_str = auth_hdr.split("Bearer ", 1)[1].strip()
+
+    decoded_token = None
+    if token_str:
+        try:
+            decoded_token = auth.verify_id_token(token_str)
+        except Exception as e:
+            logger.debug(f"Token verification failed: {e}")
+
+    if not decoded_token:
+        # Redirect unauthenticated users to / for login
+        return https_fn.Response(
+            "",
+            status=302,
+            headers={"Location": "/"}
+        )
+
+    uid = decoded_token.get("uid")
+    user_ref = db.collection("users").document(uid)
+    template = jinja_env.get_template("settings.html")
+
+    if req.method == "POST":
+        new_token = (req.form.get("github_access_token") or "").strip()
+        raw_repos = (req.form.get("monitored_repos") or "").strip()
+        repo_list = [r.strip() for r in raw_repos.split(",") if r.strip()]
+
+        update_data: Dict[str, Any] = {
+            "github_access_token": new_token if new_token else None,
+            "monitored_repos": repo_list,
+            "updated_at": firestore.SERVER_TIMESTAMP,
+        }
+
+        user_ref.set(update_data, merge=True)
+
+        doc_snap = user_ref.get()
+        user_data = doc_snap.to_dict() if doc_snap.exists else {"uid": uid}
+
+        html = template.render(
+            user=user_data,
+            saved=True
+        )
+        return https_fn.Response(html, status=200, headers={"Content-Type": "text/html; charset=utf-8"})
+
+    # GET request: render form with current values
+    doc_snap = user_ref.get()
+    user_data = doc_snap.to_dict() if doc_snap.exists else {
+        "uid": uid,
+        "email": decoded_token.get("email"),
+        "display_name": decoded_token.get("name")
+    }
+
+    html = template.render(
+        user=user_data,
+        saved=False
+    )
+    return https_fn.Response(html, status=200, headers={"Content-Type": "text/html; charset=utf-8"})
 
 
 # ============================================================================

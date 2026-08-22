@@ -26,8 +26,16 @@
     ],
     "rewrites": [
       {
-        "source": "**",
-        "destination": "/index.html"
+        "source": "/settings",
+        "function": "render_settings_page"
+      },
+      {
+        "source": "/",
+        "function": "render_main_page"
+      },
+      {
+        "source": "/main",
+        "function": "render_main_page"
       }
     ]
   },

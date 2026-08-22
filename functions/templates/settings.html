@@ -1,0 +1,42 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Settings</title>
+  <style>
+    header {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      margin-bottom: 20px;
+    }
+  </style>
+</head>
+<body>
+  <header>
+    <a href="/">Back to Tasks</a>
+    <span>{{ user.email or user.display_name or user.uid }}</span>
+  </header>
+
+  {% if saved %}
+    <div>Settings updated successfully!</div>
+  {% endif %}
+
+  <h2>Settings</h2>
+
+  <form method="POST" action="/settings">
+    <div>
+      <label for="github_access_token">GitHub Access Token (PAT):</label><br>
+      <input type="text" id="github_access_token" name="github_access_token" value="{{ user.github_access_token or '' }}">
+    </div>
+    <br>
+    <div>
+      <label for="monitored_repos">Monitored Repositories:</label><br>
+      <input type="text" id="monitored_repos" name="monitored_repos" value="{{ user.monitored_repos|join(', ') if user.monitored_repos else '' }}">
+    </div>
+    <br>
+    <button type="submit">Save Settings</button>
+  </form>
+</body>
+</html>
