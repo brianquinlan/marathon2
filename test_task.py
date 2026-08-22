@@ -42,7 +42,7 @@ def get_callable_handler(func):
 
 class TestTaskModel(unittest.TestCase):
 
-    def test_task_dataclass_defaults_and_properties(self):
+    def test_task_model_defaults_properties_and_json_serialization(self):
         task = Task(
             id="task_owner_repo_1",
             priority=0.85,
@@ -57,22 +57,29 @@ class TestTaskModel(unittest.TestCase):
         self.assertTrue(task.priority_needs_updated)
         self.assertEqual(task.issue_id, "owner_repo_1")
 
-        # Test dictionary conversion
-        d = task.to_dict(for_firestore=False)
-        self.assertEqual(d["id"], "task_owner_repo_1")
-        self.assertEqual(d["priority"], 0.85)
-        self.assertTrue(d["priority_needs_updated"])
-        self.assertEqual(d["title"], "Fix high priority bug")
+        # Test Pydantic JSON serialization
+        json_str = task.model_dump_json()
+        self.assertIn('"priority":0.85', json_str.replace(" ", ""))
+        self.assertIn('"title":"Fix high priority bug"', json_str)
+        
+        # Test dictionary conversion via model_dump
+        dumped = task.model_dump()
+        self.assertEqual(dumped["id"], "task_owner_repo_1")
+        self.assertEqual(dumped["priority"], 0.85)
+        self.assertTrue(dumped["priority_needs_updated"])
+        self.assertEqual(dumped["title"], "Fix high priority bug")
 
-        # Test reconstruction
-        reconstructed = Task.from_dict(d)
+        # Test reconstruction via model_validate
+        reconstructed = Task.model_validate(dumped)
         self.assertEqual(reconstructed.doc_id, task.doc_id)
         self.assertEqual(reconstructed.priority, 0.85)
         self.assertTrue(reconstructed.priority_needs_updated)
 
     def test_task_with_firestore_document_reference(self):
-        mock_ref = MagicMock()
-        mock_ref.path = "users/user_123/issues/owner_repo_1"
+        class FakeDocRef:
+            path = "users/user_123/issues/owner_repo_1"
+
+        mock_ref = FakeDocRef()
 
         task = Task(
             issue_id="owner_repo_1",
@@ -81,11 +88,9 @@ class TestTaskModel(unittest.TestCase):
         )
         self.assertEqual(task.doc_id, "task_owner_repo_1")
 
-        d_fs = task.to_dict(for_firestore=True)
-        self.assertIn("issue_ref", d_fs)
-
-        d_client = task.to_dict(for_firestore=False)
-        self.assertEqual(d_client["issue_path"], "users/user_123/issues/owner_repo_1")
+        d_dump = task.model_dump()
+        self.assertIn("issue_ref", d_dump)
+        self.assertEqual(d_dump["issue_ref"], mock_ref)
 
 
 class TestRankerEngine(unittest.TestCase):

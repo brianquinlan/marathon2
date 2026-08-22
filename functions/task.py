@@ -5,13 +5,13 @@ and dispatches asynchronous ranking tasks using Firebase Task Queue Functions (f
 See: https://firebase.google.com/docs/functions/task-functions#python
 """
 
-from dataclasses import dataclass, field
 from datetime import datetime, timezone
 import json
 import os
 import threading
 from typing import Any, Dict, List, Optional
 import logging
+from pydantic import BaseModel, Field, ConfigDict
 from google.cloud import firestore
 import firebase_admin
 from firebase_admin import functions as admin_functions
@@ -19,11 +19,12 @@ from firebase_admin import functions as admin_functions
 logger = logging.getLogger(__name__)
 
 
-@dataclass
-class Task:
+class Task(BaseModel):
     """
     Represents a task associated with an authenticated user and a specific GitHub issue.
     """
+    model_config = ConfigDict(arbitrary_types_allowed=True)
+
     priority: float = 0.0  # A priority value between 0.0 and 1.0
     priority_needs_updated: bool = True
     issue_ref: Optional[Any] = None  # Native Firestore DocumentReference or resource path
@@ -43,57 +44,6 @@ class Task:
         if self.issue_id:
             return f"task_{self.issue_id}"
         return "task_unknown"
-
-    def to_dict(self, for_firestore: bool = True) -> Dict[str, Any]:
-        """Converts Task to dictionary for Firestore storage or JSON responses."""
-        data: Dict[str, Any] = {
-            "id": self.doc_id,
-            "priority": max(0.0, min(1.0, float(self.priority))),
-            "priority_needs_updated": bool(self.priority_needs_updated),
-            "issue_id": self.issue_id,
-            "uid": self.uid,
-            "title": self.title,
-            "issue_url": self.issue_url,
-        }
-
-        # Handle issue reference
-        if for_firestore:
-            if self.issue_ref is not None:
-                data["issue_ref"] = self.issue_ref
-            data["updated_at"] = firestore.SERVER_TIMESTAMP
-            if self.created_at is None:
-                data["created_at"] = firestore.SERVER_TIMESTAMP
-            else:
-                data["created_at"] = self.created_at
-        else:
-            if self.issue_ref is not None:
-                data["issue_path"] = (
-                    self.issue_ref.path if hasattr(self.issue_ref, "path") else str(self.issue_ref)
-                )
-            for ts_field in ["created_at", "updated_at"]:
-                val = getattr(self, ts_field, None)
-                if val is not None and hasattr(val, "isoformat"):
-                    data[ts_field] = val.isoformat()
-                else:
-                    data[ts_field] = val
-
-        return data
-
-    @classmethod
-    def from_dict(cls, data: Dict[str, Any], doc_id: Optional[str] = None) -> "Task":
-        """Instantiates a Task dataclass from a Firestore document dictionary."""
-        return cls(
-            id=doc_id or data.get("id"),
-            priority=float(data.get("priority", 0.0)),
-            priority_needs_updated=data.get("priority_needs_updated", True),
-            issue_ref=data.get("issue_ref"),
-            issue_id=data.get("issue_id"),
-            uid=data.get("uid"),
-            title=data.get("title"),
-            issue_url=data.get("issue_url"),
-            created_at=data.get("created_at"),
-            updated_at=data.get("updated_at"),
-        )
 
 
 # ============================================================================
@@ -182,7 +132,7 @@ def ensure_task_for_issue(
     issue_url = issue_data.get("url")
 
     if doc_snap.exists:
-        task = Task.from_dict(doc_snap.to_dict() or {}, doc_id=task_doc_id)
+        task = Task.model_validate({**(doc_snap.to_dict() or {}), "id": task_doc_id})
         task.priority_needs_updated = True
         task.title = issue_title or task.title
         task.issue_url = issue_url or task.issue_url
@@ -199,7 +149,11 @@ def ensure_task_for_issue(
             issue_url=issue_url,
         )
 
-    task_ref.set(task.to_dict(for_firestore=True), merge=True)
+    task_data = task.model_dump()
+    task_data["updated_at"] = firestore.SERVER_TIMESTAMP
+    if task.created_at is None:
+        task_data["created_at"] = firestore.SERVER_TIMESTAMP
+    task_ref.set(task_data, merge=True)
     return task
 
 
@@ -215,7 +169,7 @@ def update_needed_priorities(uid: str, db: firestore.Client) -> Dict[str, Any]:
     doc_refs: Dict[str, Any] = {}
 
     for doc_snap in docs:
-        t = Task.from_dict(doc_snap.to_dict() or {}, doc_id=doc_snap.id)
+        t = Task.model_validate({**(doc_snap.to_dict() or {}), "id": doc_snap.id})
         tasks_to_update.append(t)
         doc_refs[t.doc_id] = doc_snap.reference
 
@@ -247,7 +201,7 @@ def update_needed_priorities(uid: str, db: firestore.Client) -> Dict[str, Any]:
         "status": "success",
         "updated_count": len(ranked_tasks),
         "message": f"Updated priorities for {len(ranked_tasks)} tasks.",
-        "tasks": [t.to_dict(for_firestore=False) for t in ranked_tasks],
+        "tasks": [t.model_dump(mode="json") for t in ranked_tasks],
     }
 
 
@@ -293,8 +247,8 @@ def get_user_tasks(uid: str, db: firestore.Client, limit: int = 100) -> List[Dic
 
     tasks: List[Dict[str, Any]] = []
     for doc_snap in docs:
-        t = Task.from_dict(doc_snap.to_dict() or {}, doc_id=doc_snap.id)
-        tasks.append(t.to_dict(for_firestore=False))
+        t = Task.model_validate({**(doc_snap.to_dict() or {}), "id": doc_snap.id})
+        tasks.append(t.model_dump(mode="json"))
 
     # Sort descending by priority
     tasks.sort(key=lambda x: x.get("priority", 0.0), reverse=True)

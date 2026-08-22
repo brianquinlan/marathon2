@@ -56,7 +56,14 @@ class TestUserModel(unittest.TestCase):
         self.assertEqual(user.primary_provider, "github.com")
         self.assertTrue(user.email_verified)
 
-    def test_user_to_dict_and_from_dict(self):
+        # Test Pydantic JSON serialization
+        json_str = user.model_dump_json()
+        self.assertIn('"uid":"user_abc_123"', json_str.replace(" ", ""))
+        self.assertIn('"github_access_token":"gho_test_token_123"', json_str.replace(" ", ""))
+        dumped = user.model_dump()
+        self.assertEqual(dumped["uid"], "user_abc_123")
+
+    def test_user_model_dump_and_model_validate(self):
         user = User(
             uid="user_999",
             email="google@domain.com",
@@ -65,14 +72,14 @@ class TestUserModel(unittest.TestCase):
             monitored_repos=["owner/repo1"],
             custom_data={"role": "maintainer"}
         )
-        data = user.to_dict(for_firestore=False)
+        data = user.model_dump()
         self.assertEqual(data["uid"], "user_999")
         self.assertEqual(data["github_access_token"], "gho_xyz")
         self.assertEqual(data["monitored_repos"], ["owner/repo1"])
         self.assertEqual(data["custom_data"]["role"], "maintainer")
 
         # Reconstruct from dict
-        reconstructed = User.from_dict(data)
+        reconstructed = User.model_validate(data)
         self.assertEqual(reconstructed.uid, user.uid)
         self.assertEqual(reconstructed.github_access_token, "gho_xyz")
         self.assertEqual(reconstructed.monitored_repos, ["owner/repo1"])

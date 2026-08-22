@@ -253,8 +253,7 @@ def associate_user_info(req: https_fn.CallableRequest) -> Dict[str, Any]:
     doc_snap = user_ref.get()
 
     if doc_snap.exists:
-        existing_data = doc_snap.to_dict() or {}
-        user = User.from_dict(existing_data, uid=uid)
+        user = User.model_validate({**(doc_snap.to_dict() or {}), "uid": uid})
 
         # Update fields if provided
         if github_access_token is not None:
@@ -288,7 +287,7 @@ def associate_user_info(req: https_fn.CallableRequest) -> Dict[str, Any]:
         )
         action = "created"
 
-    user_ref.set(user.to_dict(for_firestore=True), merge=True)
+    user_ref.set({**user.model_dump(), "updated_at": firestore.SERVER_TIMESTAMP}, merge=True)
     logger.info(f"User {action} in Firestore for UID {uid} (provider: {provider_info.get('primary_provider_name')})")
 
     return {
@@ -296,7 +295,7 @@ def associate_user_info(req: https_fn.CallableRequest) -> Dict[str, Any]:
         "action": action,
         "uid": uid,
         "provider": provider_info.get("primary_provider_name"),
-        "user": user.to_dict(for_firestore=False),
+        "user": user.model_dump(mode="json"),
     }
 
 
@@ -325,13 +324,13 @@ def get_user_info(req: https_fn.CallableRequest) -> Dict[str, Any]:
             token_dict=token,
             provider_info=provider_info,
         )
-        user_ref.set(user.to_dict(for_firestore=True))
+        user_ref.set({**user.model_dump(), "updated_at": firestore.SERVER_TIMESTAMP})
     else:
-        user = User.from_dict(doc_snap.to_dict() or {}, uid=uid)
+        user = User.model_validate({**(doc_snap.to_dict() or {}), "uid": uid})
 
     return {
         "status": "success",
-        "user": user.to_dict(for_firestore=False),
+        "user": user.model_dump(mode="json"),
         "auth_provider": provider_info,
     }
 
@@ -357,7 +356,7 @@ def sync_auth_profile(req: https_fn.CallableRequest) -> Dict[str, Any]:
     doc_snap = user_ref.get()
 
     if doc_snap.exists:
-        user = User.from_dict(doc_snap.to_dict() or {}, uid=uid)
+        user = User.model_validate({**(doc_snap.to_dict() or {}), "uid": uid})
     else:
         user = User(uid=uid)
 
@@ -370,13 +369,13 @@ def sync_auth_profile(req: https_fn.CallableRequest) -> Dict[str, Any]:
     user.github_id = provider_info.get("github_id")
     user.linked_providers = provider_info.get("linked_providers", [])
 
-    user_ref.set(user.to_dict(for_firestore=True), merge=True)
+    user_ref.set({**user.model_dump(), "updated_at": firestore.SERVER_TIMESTAMP}, merge=True)
     logger.info(f"Synchronized User auth profile for UID {uid}")
 
     return {
         "status": "success",
         "message": "Auth profile synced successfully.",
-        "user": user.to_dict(for_firestore=False),
+        "user": user.model_dump(mode="json"),
         "auth_record": full_auth_record,
     }
 
@@ -434,7 +433,7 @@ def sync_github_issues(req: https_fn.CallableRequest) -> Dict[str, Any]:
             message="User document not found in Firestore. Please configure your GitHub access token first."
         )
 
-    user = User.from_dict(doc_snap.to_dict() or {}, uid=uid)
+    user = User.model_validate({**(doc_snap.to_dict() or {}), "uid": uid})
 
     if not user.github_access_token:
         raise https_fn.HttpsError(
@@ -721,7 +720,7 @@ def user_api(req: https_fn.Request) -> https_fn.Response:
     if req.method == "GET":
         doc_snap = user_ref.get()
         if doc_snap.exists:
-            user = User.from_dict(doc_snap.to_dict() or {}, uid=uid)
+            user = User.model_validate({**(doc_snap.to_dict() or {}), "uid": uid})
         else:
             user = User.from_auth_token(decoded_token, provider_info)
 
@@ -730,7 +729,7 @@ def user_api(req: https_fn.Request) -> https_fn.Response:
                 "status": "success",
                 "uid": uid,
                 "provider": provider_info.get("primary_provider_name"),
-                "user": user.to_dict(for_firestore=False)
+                "user": user.model_dump(mode="json")
             }, default=str),
             status=200,
             headers={"Content-Type": "application/json"}
@@ -744,7 +743,7 @@ def user_api(req: https_fn.Request) -> https_fn.Response:
 
         doc_snap = user_ref.get()
         if doc_snap.exists:
-            user = User.from_dict(doc_snap.to_dict() or {}, uid=uid)
+            user = User.model_validate({**(doc_snap.to_dict() or {}), "uid": uid})
         else:
             user = User.from_auth_token(decoded_token, provider_info)
 
@@ -759,12 +758,12 @@ def user_api(req: https_fn.Request) -> https_fn.Response:
         elif "associated_data" in body:
             user.custom_data.update(body.get("associated_data") or {})
 
-        user_ref.set(user.to_dict(for_firestore=True), merge=True)
+        user_ref.set({**user.model_dump(), "updated_at": firestore.SERVER_TIMESTAMP}, merge=True)
         return https_fn.Response(
             json.dumps({
                 "status": "success",
                 "message": "User data updated successfully.",
-                "user": user.to_dict(for_firestore=False)
+                "user": user.model_dump(mode="json")
             }),
             status=200,
             headers={"Content-Type": "application/json"}
@@ -856,7 +855,7 @@ def on_user_settings_changed(
             f"(is_new={is_new}, token_changed={token_changed}, repos_changed={repos_changed}). "
             f"Triggering background GitHub sync."
         )
-        user = User.from_dict(after_data, uid=uid)
+        user = User.model_validate({**after_data, "uid": uid})
         start_user_github_sync(user=user, db=db, state="open")
 
 

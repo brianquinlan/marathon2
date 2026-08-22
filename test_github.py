@@ -31,7 +31,7 @@ from user import User
 
 class TestGitHubDataStructures(unittest.TestCase):
 
-    def test_comment_dataclass_and_from_api_dict(self):
+    def test_comment_model_and_json_serialization(self):
         raw_api = {
             "id": 1001,
             "user": {"login": "octocat"},
@@ -44,11 +44,16 @@ class TestGitHubDataStructures(unittest.TestCase):
         self.assertEqual(comment.user_login, "octocat")
         self.assertEqual(comment.body, "LGTM!")
 
-        d = comment.to_dict()
+        # Test Pydantic JSON serialization
+        json_str = comment.model_dump_json()
+        self.assertIn('"id":1001', json_str.replace(" ", ""))
+        self.assertIn('"user_login":"octocat"', json_str.replace(" ", ""))
+
+        d = comment.model_dump()
         self.assertEqual(d["id"], 1001)
         self.assertEqual(d["user_login"], "octocat")
 
-    def test_issue_dataclass_and_properties(self):
+    def test_issue_model_and_json_serialization(self):
         issue = Issue(
             url="https://github.com/brianquinlan/marathon2/issues/42",
             owner="brianquinlan",
@@ -68,6 +73,13 @@ class TestGitHubDataStructures(unittest.TestCase):
         self.assertEqual(issue.doc_id, "brianquinlan_marathon2_42")
         self.assertEqual(issue.issue_type, IssueType.ISSUE)
         self.assertIn("assigned", issue.association_reasons)
+
+        # Test Pydantic JSON serialization
+        json_str = issue.model_dump_json()
+        self.assertIn('"owner":"brianquinlan"', json_str.replace(" ", ""))
+        self.assertIn('"issue_type":"issue"', json_str.replace(" ", ""))
+        dumped = issue.model_dump()
+        self.assertEqual(dumped["issue_number"], 42)
 
 
 class TestSinglePageFetchingAndPagination(unittest.TestCase):

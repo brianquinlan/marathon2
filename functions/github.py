@@ -10,7 +10,6 @@ Uses asynchronous chained Firebase Task Queue Functions (with seamless local emu
 NOTE: Tasks are ONLY created/updated once an Issue and all of its comments are fully imported into Firestore.
 """
 
-from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from enum import Enum
 import re
@@ -18,6 +17,7 @@ import threading
 from typing import Any, Dict, List, Optional, Set, Tuple
 import logging
 import requests
+from pydantic import BaseModel, Field, ConfigDict
 from google.cloud import firestore
 import firebase_admin
 from firebase_admin import functions as admin_functions
@@ -35,22 +35,14 @@ class IssueType(str, Enum):
     PULL_REQUEST = "pull_request"
 
 
-@dataclass
-class Comment:
+class Comment(BaseModel):
+    model_config = ConfigDict(arbitrary_types_allowed=True)
+
     id: int
     user_login: str
     body: str
     created_at: Optional[datetime] = None
     updated_at: Optional[datetime] = None
-
-    def to_dict(self) -> Dict[str, Any]:
-        return {
-            "id": self.id,
-            "user_login": self.user_login,
-            "body": self.body,
-            "created_at": self.created_at.isoformat() if self.created_at else None,
-            "updated_at": self.updated_at.isoformat() if self.updated_at else None,
-        }
 
     @classmethod
     def from_api_dict(cls, data: Dict[str, Any]) -> "Comment":
@@ -62,19 +54,10 @@ class Comment:
             updated_at=_parse_github_datetime(data.get("updated_at")),
         )
 
-    @classmethod
-    def from_dict(cls, data: Dict[str, Any]) -> "Comment":
-        return cls(
-            id=data["id"],
-            user_login=data.get("user_login", "unknown"),
-            body=data.get("body", ""),
-            created_at=_parse_github_datetime(data.get("created_at")),
-            updated_at=_parse_github_datetime(data.get("updated_at")),
-        )
 
+class Issue(BaseModel):
+    model_config = ConfigDict(arbitrary_types_allowed=True)
 
-@dataclass
-class Issue:
     url: str
     owner: str
     repo: str
@@ -82,15 +65,15 @@ class Issue:
     issue_type: IssueType
     comments_url: str
     number: int
-    body: Optional[str]
+    body: Optional[str] = None
     user_login: str
-    assignee_logins: List[str]
+    assignee_logins: List[str] = Field(default_factory=list)
     created_at: datetime
     updated_at: datetime
     state: str = "open"
     last_comment_update_time: Optional[datetime] = None
-    comments: List[Comment] = field(default_factory=list)
-    association_reasons: List[str] = field(default_factory=list)
+    comments: List[Comment] = Field(default_factory=list)
+    association_reasons: List[str] = Field(default_factory=list)
     title: Optional[str] = None
 
     @property
@@ -103,67 +86,6 @@ class Issue:
     @property
     def created_atr(self) -> datetime:
         return self.created_at
-
-    def to_dict(self, for_firestore: bool = True) -> Dict[str, Any]:
-        data = {
-            "doc_id": self.doc_id,
-            "url": self.url,
-            "owner": self.owner,
-            "repo": self.repo,
-            "issue_number": self.issue_number,
-            "number": self.number,
-            "title": self.title,
-            "issue_type": self.issue_type.value,
-            "state": self.state,
-            "comments_url": self.comments_url,
-            "body": self.body,
-            "user_login": self.user_login,
-            "assignee_logins": self.assignee_logins,
-            "association_reasons": self.association_reasons,
-            "created_at": self.created_at.isoformat() if self.created_at else None,
-            "updated_at": self.updated_at.isoformat() if self.updated_at else None,
-            "last_comment_update_time": (
-                self.last_comment_update_time.isoformat()
-                if self.last_comment_update_time
-                else None
-            ),
-            "comments": [c.to_dict() for c in self.comments],
-        }
-
-        if for_firestore:
-            data["synced_at"] = firestore.SERVER_TIMESTAMP
-        else:
-            data["synced_at"] = datetime.now(timezone.utc).isoformat()
-
-        return data
-
-    @classmethod
-    def from_dict(cls, data: Dict[str, Any]) -> "Issue":
-        issue_type_str = data.get("issue_type", "issue")
-        issue_type = IssueType.PULL_REQUEST if issue_type_str == "pull_request" else IssueType.ISSUE
-        
-        comments_data = data.get("comments") or []
-        comments = [Comment.from_dict(c) for c in comments_data if isinstance(c, dict)]
-
-        return cls(
-            url=data.get("url", ""),
-            owner=data.get("owner", "unknown"),
-            repo=data.get("repo", "unknown"),
-            issue_number=data.get("issue_number") or data.get("number", 0),
-            number=data.get("number") or data.get("issue_number", 0),
-            title=data.get("title"),
-            issue_type=issue_type,
-            state=data.get("state", "open"),
-            comments_url=data.get("comments_url", ""),
-            body=data.get("body"),
-            user_login=data.get("user_login", "unknown"),
-            assignee_logins=data.get("assignee_logins") or [],
-            created_at=_parse_github_datetime(data.get("created_at")) or datetime.now(timezone.utc),
-            updated_at=_parse_github_datetime(data.get("updated_at")) or datetime.now(timezone.utc),
-            last_comment_update_time=_parse_github_datetime(data.get("last_comment_update_time")),
-            comments=comments,
-            association_reasons=data.get("association_reasons") or [],
-        )
 
 
 def _parse_github_datetime(dt_val: Optional[Any]) -> Optional[datetime]:
@@ -328,7 +250,7 @@ def process_and_save_issue_page(
             existing_data = doc_snap.to_dict() or {}
             reasons.update(existing_data.get("association_reasons") or [])
             existing_comments = [
-                Comment.from_dict(c)
+                Comment.model_validate(c)
                 for c in existing_data.get("comments", [])
                 if isinstance(c, dict)
             ]
@@ -354,7 +276,9 @@ def process_and_save_issue_page(
             association_reasons=sorted(list(reasons)),
         )
 
-        doc_ref.set(issue.to_dict(for_firestore=True), merge=True)
+        issue_dict = issue.model_dump(mode="json")
+        issue_dict["synced_at"] = firestore.SERVER_TIMESTAMP
+        doc_ref.set(issue_dict, merge=True)
 
         # Only create Task immediately if the issue has 0 comments (already fully imported)
         comments_count = item.get("comments", 0)
@@ -362,7 +286,7 @@ def process_and_save_issue_page(
             ensure_task_for_issue(
                 uid=uid,
                 issue_id=doc_id,
-                issue_data=issue.to_dict(for_firestore=False),
+                issue_data=issue.model_dump(mode="json"),
                 db=db
             )
             logger.info(f"Created/updated Task for issue {doc_id} with 0 comments.")
@@ -394,7 +318,7 @@ def process_and_save_comment_page(
 
     existing_data = doc_snap.to_dict() or {}
     existing_comments = [
-        Comment.from_dict(c)
+        Comment.model_validate(c)
         for c in existing_data.get("comments", [])
         if isinstance(c, dict)
     ]
@@ -415,7 +339,7 @@ def process_and_save_comment_page(
     )
 
     update_payload: Dict[str, Any] = {
-        "comments": [c.to_dict() for c in all_comments],
+        "comments": [c.model_dump(mode="json") for c in all_comments],
         "updated_at": firestore.SERVER_TIMESTAMP,
     }
     if last_comment_time:
@@ -459,7 +383,7 @@ def execute_issue_page_sync(
     if not doc_snap.exists:
         return {"status": "error", "message": "User document not found."}
 
-    user = User.from_dict(doc_snap.to_dict() or {}, uid=uid)
+    user = User.model_validate({**(doc_snap.to_dict() or {}), "uid": uid})
     if not user.github_access_token:
         return {"status": "error", "message": "User does not have github_access_token configured."}
 
@@ -542,7 +466,7 @@ def execute_comment_page_sync(
     if not doc_snap.exists:
         return {"status": "error", "message": "User document not found."}
 
-    user = User.from_dict(doc_snap.to_dict() or {}, uid=uid)
+    user = User.model_validate({**(doc_snap.to_dict() or {}), "uid": uid})
     if not user.github_access_token:
         return {"status": "error", "message": "User does not have github_access_token configured."}
 
@@ -919,7 +843,7 @@ def sync_all_users_closed_issues(db: firestore.Client) -> Dict[str, Any]:
 
     for doc_snap in users_docs:
         data = doc_snap.to_dict() or {}
-        user = User.from_dict(data, uid=doc_snap.id)
+        user = User.model_validate({**data, "uid": doc_snap.id})
         if user.github_access_token:
             try:
                 res = sync_closed_issues_for_user(user=user, db=db)
