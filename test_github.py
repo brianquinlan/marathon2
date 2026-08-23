@@ -70,9 +70,11 @@ class TestGitHubDataStructures(unittest.TestCase):
             created_at=datetime(2026, 8, 22, 9, 0, tzinfo=timezone.utc),
             updated_at=datetime(2026, 8, 22, 9, 30, tzinfo=timezone.utc),
             association_reasons=[AssociationReason.ASSIGNED, AssociationReason.CREATED],
+            upvotes=15,
         )
         self.assertEqual(issue.doc_id, "brianquinlan_marathon2_42")
         self.assertEqual(issue.issue_type, IssueType.ISSUE)
+        self.assertEqual(issue.upvotes, 15)
         self.assertIn(AssociationReason.ASSIGNED, issue.association_reasons)
         self.assertIn("assigned", issue.association_reasons)
 
@@ -80,9 +82,11 @@ class TestGitHubDataStructures(unittest.TestCase):
         json_str = issue.model_dump_json()
         self.assertIn('"owner":"brianquinlan"', json_str.replace(" ", ""))
         self.assertIn('"issue_type":"issue"', json_str.replace(" ", ""))
+        self.assertIn('"upvotes":15', json_str.replace(" ", ""))
         self.assertIn('"association_reasons":["assigned","created"]', json_str.replace(" ", ""))
         dumped = issue.model_dump()
         self.assertEqual(dumped["issue_number"], 42)
+        self.assertEqual(dumped["upvotes"], 15)
 
 
 class TestPyGithubAdaptors(unittest.TestCase):
@@ -117,6 +121,8 @@ class TestPyGithubAdaptors(unittest.TestCase):
         mock_pygh_issue.created_at = datetime(2026, 8, 22, 8, 0, tzinfo=timezone.utc)
         mock_pygh_issue.updated_at = datetime(2026, 8, 22, 8, 30, tzinfo=timezone.utc)
         mock_pygh_issue.comments_url = "https://api.github.com/repos/brianquinlan/marathon2/issues/105/comments"
+        mock_pygh_issue.raw_data = {"reactions": {"+1": 24, "total_count": 30}}
+        mock_pygh_issue.reactions = {"+1": 24}
 
         issue = issue_from_pygithub(mock_pygh_issue, reason=AssociationReason.ASSIGNED)
         self.assertEqual(issue.doc_id, "brianquinlan_marathon2_105")
@@ -125,6 +131,7 @@ class TestPyGithubAdaptors(unittest.TestCase):
         self.assertEqual(issue.repo, "marathon2")
         self.assertEqual(issue.title, "Add PyGithub integration")
         self.assertEqual(issue.assignee_logins, ["brianquinlan"])
+        self.assertEqual(issue.upvotes, 24)
 
 
 class TestSinglePageFetchingAndPagination(unittest.TestCase):

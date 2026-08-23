@@ -35,6 +35,7 @@ class Task(BaseModel):
     id: str | None = None  # Task document ID (e.g. task_{github_issue_id})
     github_issue_title: str | None = None  # Optional cached title copied from GitHub issue
     github_issue_url: str | None = None  # Optional direct URL copied from GitHub issue
+    github_issue_upvotes: int = 0  # Number of +1 upvotes / reactions on the GitHub issue
     created_at: datetime | str | object | None = None
     updated_at: datetime | str | object | None = None
 
@@ -144,6 +145,8 @@ def ensure_task_for_issue(uid: str, issue_id: str, issue_data: dict[str, object]
     issue_title = str(raw_title) if raw_title is not None else None
     raw_url = issue_data.get("url")
     issue_url = str(raw_url) if raw_url is not None else None
+    raw_upvotes = issue_data.get("upvotes")
+    issue_upvotes = int(raw_upvotes) if isinstance(raw_upvotes, int) else 0
 
     if doc_snap.exists:
         raw_dict = doc_snap.to_dict() or {}
@@ -151,6 +154,7 @@ def ensure_task_for_issue(uid: str, issue_id: str, issue_data: dict[str, object]
         task.priority_needs_updated = True
         task.github_issue_title = issue_title or task.github_issue_title
         task.github_issue_url = issue_url or task.github_issue_url
+        task.github_issue_upvotes = issue_upvotes if issue_upvotes > 0 else task.github_issue_upvotes
         task.github_issue_ref = issue_ref
         task.github_issue_id = issue_id
     else:
@@ -163,6 +167,7 @@ def ensure_task_for_issue(uid: str, issue_id: str, issue_data: dict[str, object]
             uid=uid,
             github_issue_title=issue_title,
             github_issue_url=issue_url,
+            github_issue_upvotes=issue_upvotes,
         )
 
     task_data = task.model_dump()

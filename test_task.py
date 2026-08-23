@@ -53,16 +53,19 @@ class TestTaskModel(unittest.TestCase):
             uid="user_123",
             github_issue_title="Fix high priority bug",
             github_issue_url="https://github.com/owner/repo/issues/1",
+            github_issue_upvotes=42,
         )
         self.assertEqual(task.doc_id, "task_owner_repo_1")
         self.assertEqual(task.priority, 0.85)
         self.assertTrue(task.priority_needs_updated)
         self.assertEqual(task.github_issue_id, "owner_repo_1")
+        self.assertEqual(task.github_issue_upvotes, 42)
 
         # Test Pydantic JSON serialization
         json_str = task.model_dump_json()
         self.assertIn('"priority":0.85', json_str.replace(" ", ""))
         self.assertIn('"github_issue_title":"Fix high priority bug"', json_str)
+        self.assertIn('"github_issue_upvotes":42', json_str.replace(" ", ""))
 
         # Test dictionary conversion via model_dump
         dumped = task.model_dump()
@@ -71,12 +74,14 @@ class TestTaskModel(unittest.TestCase):
         self.assertTrue(dumped["priority_needs_updated"])
         self.assertEqual(dumped["github_issue_title"], "Fix high priority bug")
         self.assertEqual(dumped["github_issue_url"], "https://github.com/owner/repo/issues/1")
+        self.assertEqual(dumped["github_issue_upvotes"], 42)
 
         # Test reconstruction via model_validate
         reconstructed = Task.model_validate(dumped)
         self.assertEqual(reconstructed.doc_id, task.doc_id)
         self.assertEqual(reconstructed.priority, 0.85)
         self.assertTrue(reconstructed.priority_needs_updated)
+        self.assertEqual(reconstructed.github_issue_upvotes, 42)
 
     def test_task_with_firestore_document_reference(self):
         class FakeDocRef:
@@ -112,15 +117,23 @@ class TestRankerEngine(unittest.TestCase):
             self.assertIn("@brian", user_prompt)
             self.assertIn("Critical Blocker", user_prompt)
             self.assertIn("Hey @brian please check this ASAP", user_prompt)
+            self.assertIn("Upvotes (+1 reactions): 18", user_prompt)
             return mock_res
 
         mock_agent.run_sync.side_effect = fake_run_sync
 
-        task = Task(id="task_1", priority=0.0, priority_needs_updated=True, github_issue_title="Critical Blocker")
+        task = Task(
+            id="task_1",
+            priority=0.0,
+            priority_needs_updated=True,
+            github_issue_title="Critical Blocker",
+            github_issue_upvotes=18,
+        )
         issue_data = {
             "title": "Critical Blocker",
             "body": "System down due to null pointer.",
             "user": "alice",
+            "upvotes": 18,
             "comments": [
                 {
                     "user_login": "charlie",
@@ -179,13 +192,14 @@ class TestTaskFirestoreOperations(unittest.TestCase):
         task = ensure_task_for_issue(
             uid="user_100",
             issue_id="org_repo_1",
-            issue_data={"title": "Brand new issue", "url": "https://github.com/org/repo/issues/1"},
+            issue_data={"title": "Brand new issue", "url": "https://github.com/org/repo/issues/1", "upvotes": 9},
             db=mock_db,
         )
         self.assertEqual(task.doc_id, "task_org_repo_1")
         self.assertTrue(task.priority_needs_updated)
         self.assertEqual(task.github_issue_title, "Brand new issue")
         self.assertEqual(task.github_issue_url, "https://github.com/org/repo/issues/1")
+        self.assertEqual(task.github_issue_upvotes, 9)
         mock_task_ref.set.assert_called_once()
 
         # Case 2: Task already exists (modified issue -> sets priority_needs_updated = True)
@@ -196,17 +210,19 @@ class TestTaskFirestoreOperations(unittest.TestCase):
             "priority_needs_updated": False,
             "github_issue_id": "org_repo_1",
             "github_issue_title": "Old title",
+            "github_issue_upvotes": 5,
         }
         mock_task_ref.set.reset_mock()
 
         updated_task = ensure_task_for_issue(
             uid="user_100",
             issue_id="org_repo_1",
-            issue_data={"title": "Updated issue title", "url": "https://github.com/org/repo/issues/1"},
+            issue_data={"title": "Updated issue title", "url": "https://github.com/org/repo/issues/1", "upvotes": 12},
             db=mock_db,
         )
         self.assertTrue(updated_task.priority_needs_updated)
         self.assertEqual(updated_task.github_issue_title, "Updated issue title")
+        self.assertEqual(updated_task.github_issue_upvotes, 12)
         self.assertEqual(updated_task.priority, 0.7)
         mock_task_ref.set.assert_called_once()
 

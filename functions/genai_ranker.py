@@ -32,6 +32,7 @@ class TaskProtocol(Protocol):
     priority: float
     priority_needs_updated: bool
     github_issue_title: str | None
+    github_issue_upvotes: int
 
 
 TTask = TypeVar("TTask", bound=TaskProtocol)
@@ -115,10 +116,12 @@ def run_ranker(
     issue_author = issue_data.get("user") or "unknown"
     issue_labels = issue_data.get("labels") or []
     issue_assignees = issue_data.get("assignees") or []
+    raw_upvotes = issue_data.get("upvotes")
+    issue_upvotes = int(raw_upvotes) if isinstance(raw_upvotes, int) else task.github_issue_upvotes
 
     logger.info(
         f"[RANKER] Issue details for {task.doc_id}: title='{issue_title}', state='{issue_state}', "
-        f"author='{issue_author}', comments_count={len(comments)}"
+        f"author='{issue_author}', upvotes={issue_upvotes}, comments_count={len(comments)}"
     )
 
     system_instruction = (
@@ -128,6 +131,7 @@ def run_ranker(
         "- Direct user mentions or requests for action: If the current user is @mentioned in the issue body or comments, or explicitly asked for input/review/action, assign HIGH priority (0.80 - 1.00).\n"
         "- Directly assigned or blocker bugs: High priority bugs, regressions, or issues assigned to the user should be rated 0.70 - 0.90.\n"
         "- Active discussions or questions: Active ongoing discussions where the user is involved or monitored repo issues should be rated 0.40 - 0.70.\n"
+        "- Community interest & upvotes: Issues with a high number of upvotes (+1 reactions) indicate broad user impact or popularity and should receive increased priority.\n"
         "- Informational / low urgency: Low impact feature requests, minor discussions, or items not requiring immediate attention should be rated 0.10 - 0.40.\n"
         "- Closed or resolved: 0.00 - 0.10.\n"
         "Always return a structured response conforming to the TaskPriorityOutput schema with a numerical priority float."
@@ -142,6 +146,7 @@ GitHub Issue Details:
 - Author: @{issue_author}
 - Assignees: {issue_assignees}
 - Labels: {issue_labels}
+- Upvotes (+1 reactions): {issue_upvotes}
 
 Issue Description:
 {issue_body}

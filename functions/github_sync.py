@@ -95,6 +95,7 @@ class Issue(BaseModel):
     comments: list[Comment] = Field(default_factory=list)
     association_reasons: list[AssociationReason] = Field(default_factory=list)
     title: str | None = None
+    upvotes: int = 0
 
     @property
     def doc_id(self) -> str:
@@ -224,6 +225,14 @@ def issue_from_pygithub(
         pygh_issue.comments_url or f"{GITHUB_API_BASE_URL}/repos/{owner}/{repo}/issues/{pygh_issue.number}/comments"
     )
 
+    upvotes = 0
+    if isinstance(pygh_issue.raw_data, dict):
+        raw_reactions = pygh_issue.raw_data.get("reactions")
+        if isinstance(raw_reactions, dict):
+            upvotes = _safe_int(raw_reactions.get("+1"), 0)
+    if upvotes == 0 and pygh_issue.reactions and isinstance(pygh_issue.reactions, dict):
+        upvotes = _safe_int(pygh_issue.reactions.get("+1"), 0)
+
     return Issue(
         url=str(pygh_issue.html_url or f"https://github.com/{owner}/{repo}/issues/{pygh_issue.number}"),
         owner=owner,
@@ -240,6 +249,7 @@ def issue_from_pygithub(
         created_at=_ensure_utc(pygh_issue.created_at) or datetime.now(timezone.utc),
         updated_at=_ensure_utc(pygh_issue.updated_at) or datetime.now(timezone.utc),
         association_reasons=[parsed_reason],
+        upvotes=upvotes,
     )
 
 
