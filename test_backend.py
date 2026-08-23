@@ -82,6 +82,24 @@ class TestUserModel(unittest.TestCase):
         self.assertEqual(reconstructed.github_access_token, "gho_xyz")
         self.assertEqual(reconstructed.monitored_repos, ["owner/repo1"])
 
+    def test_user_timestamps_handling(self):
+        from datetime import datetime, timezone
+
+        now = datetime(2026, 8, 23, 10, 0, 0, tzinfo=timezone.utc)
+        user = User.model_validate(
+            {
+                "uid": "user_time_1",
+                "created_at": now.isoformat(),
+                "updated_at": "2026-08-23T10:05:00Z",  # Pydantic string coercion
+            }
+        )
+        self.assertEqual(user.created_at, now)
+        self.assertIsInstance(user.updated_at, datetime)
+        self.assertEqual(user.updated_at, datetime(2026, 8, 23, 10, 5, 0, tzinfo=timezone.utc))
+
+        json_str = user.model_dump_json()
+        self.assertIn('"created_at":"2026-08-23T10:00:00Z"', json_str.replace("+00:00", "Z"))
+
 
 class TestAuthProviderExtraction(unittest.TestCase):
     def test_extract_google_provider_info(self):

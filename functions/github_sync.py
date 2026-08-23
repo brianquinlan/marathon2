@@ -20,7 +20,6 @@ from enum import Enum
 from firebase_admin import functions as admin_functions
 from github import Auth, Github, GithubException, GithubObject
 from github.Issue import Issue as PyghIssue
-from github.IssueComment import IssueComment as PyghComment
 from github.PaginatedList import PaginatedList
 from google.cloud import firestore
 from pydantic import BaseModel, ConfigDict, Field
@@ -61,62 +60,6 @@ class IssuePayload(BaseModel):
     comments: list[dict[str, object]] = Field(default_factory=list)
 
 
-class Comment(BaseModel):
-    model_config = ConfigDict(arbitrary_types_allowed=True)
-
-    id: int
-    user_login: str
-    body: str
-    created_at: datetime | None = None
-    updated_at: datetime | None = None
-
-    @classmethod
-    def from_api_dict(cls, data: dict[str, object]) -> "Comment":
-        raw_user = data.get("user")
-        user_login = "unknown"
-        if isinstance(raw_user, dict):
-            user_login = str(raw_user.get("login", "unknown"))
-        raw_id = data.get("id", 0)
-        c_id = int(raw_id) if isinstance(raw_id, int) or (isinstance(raw_id, str) and raw_id.isdigit()) else 0
-        return cls(
-            id=c_id,
-            user_login=user_login,
-            body=str(data.get("body") or ""),
-            created_at=_parse_github_datetime(data.get("created_at")),
-            updated_at=_parse_github_datetime(data.get("updated_at")),
-        )
-
-
-class Issue(BaseModel):
-    model_config = ConfigDict(arbitrary_types_allowed=True)
-
-    url: str
-    owner: str
-    repo: str
-    issue_number: int
-    issue_type: IssueType
-    comments_url: str
-    number: int
-    body: str | None = None
-    user_login: str
-    assignee_logins: list[str] = Field(default_factory=list)
-    created_at: datetime
-    updated_at: datetime
-    state: str = "open"
-    last_comment_update_time: datetime | None = None
-    comments: list[Comment] = Field(default_factory=list)
-    association_reasons: list[AssociationReason] = Field(default_factory=list)
-    title: str | None = None
-    upvotes: int = 0
-
-    @property
-    def doc_id(self) -> str:
-        """Unique document ID for Firestore: {owner}_{repo}_{number}"""
-        clean_owner = re.sub(r"[^a-zA-Z0-9_-]", "_", self.owner)
-        clean_repo = re.sub(r"[^a-zA-Z0-9_-]", "_", self.repo)
-        return f"{clean_owner}_{clean_repo}_{self.issue_number}"
-
-
 def _safe_int(val: object, default: int = 0) -> int:
     """Safely converts an object to int or returns default."""
     if isinstance(val, int):
@@ -124,12 +67,6 @@ def _safe_int(val: object, default: int = 0) -> int:
     if isinstance(val, str) and (val.isdigit() or (val.startswith("-") and val[1:].isdigit())):
         return int(val)
     return default
-
-
-def _ensure_utc(dt_val: datetime | None) -> datetime | None:
-    if dt_val is None:
-        return None
-    return dt_val if dt_val.tzinfo else dt_val.replace(tzinfo=timezone.utc)
 
 
 def _parse_github_datetime(dt_val: datetime | str | object | None) -> datetime | None:
@@ -172,7 +109,7 @@ def _extract_owner_and_repo(issue_data: dict[str, object]) -> tuple[str, str]:
 
 
 # ============================================================================
-# PyGithub Client & Adaptors
+# PyGithub Client
 # ============================================================================
 
 
@@ -182,83 +119,6 @@ def get_github_client(access_token: str) -> Github:
     """
     auth = Auth.Token(access_token)
     return Github(auth=auth, timeout=20, user_agent="Firebase-GitHub-Sync-App")
-
-
-def comment_from_pygithub(pygh_comment: PyghComment) -> Comment:
-    """
-    Converts a PyGithub IssueComment object to our internal Comment model.
-    """
-    author = "unknown"
-    if pygh_comment.user:
-        author = pygh_comment.user.login or "unknown"
-    return Comment(
-        id=pygh_comment.id,
-        user_login=author,
-        body=pygh_comment.body or "",
-        created_at=_ensure_utc(pygh_comment.created_at),
-        updated_at=_ensure_utc(pygh_comment.updated_at),
-    )
-
-
-def issue_from_pygithub(
-    pygh_issue: PyghIssue,
-    reason: AssociationReason | str,
-    owner_fallback: str | None = None,
-    repo_fallback: str | None = None,
-) -> Issue:
-    """
-    Converts a PyGithub Issue object to our internal Issue model.
-    """
-    owner = owner_fallback or "unknown"
-    repo = repo_fallback or "unknown"
-    if pygh_issue.repository:
-        if pygh_issue.repository.owner:
-            owner = pygh_issue.repository.owner.login or owner
-        repo = pygh_issue.repository.name or repo
-
-    is_pr = pygh_issue.pull_request is not None
-    issue_type = IssueType.PULL_REQUEST if is_pr else IssueType.ISSUE
-    author = pygh_issue.user.login if pygh_issue.user else "unknown"
-    assignees: list[str] = []
-    if pygh_issue.assignees:
-        assignees = [str(a.login) for a in pygh_issue.assignees if a and a.login]
-
-    parsed_reason = (
-        AssociationReason(reason)
-        if isinstance(reason, str) and reason in AssociationReason._value2member_map_
-        else (reason if isinstance(reason, AssociationReason) else AssociationReason.ASSIGNED)
-    )
-
-    comments_url = (
-        pygh_issue.comments_url or f"{GITHUB_API_BASE_URL}/repos/{owner}/{repo}/issues/{pygh_issue.number}/comments"
-    )
-
-    upvotes = 0
-    if isinstance(pygh_issue.raw_data, dict):
-        raw_reactions = pygh_issue.raw_data.get("reactions")
-        if isinstance(raw_reactions, dict):
-            upvotes = _safe_int(raw_reactions.get("+1"), 0)
-    if upvotes == 0 and pygh_issue.reactions and isinstance(pygh_issue.reactions, dict):
-        upvotes = _safe_int(pygh_issue.reactions.get("+1"), 0)
-
-    return Issue(
-        url=str(pygh_issue.html_url or f"https://github.com/{owner}/{repo}/issues/{pygh_issue.number}"),
-        owner=owner,
-        repo=repo,
-        issue_number=pygh_issue.number,
-        number=pygh_issue.number,
-        title=pygh_issue.title,
-        issue_type=issue_type,
-        state=pygh_issue.state or "open",
-        comments_url=str(comments_url),
-        body=pygh_issue.body,
-        user_login=author,
-        assignee_logins=assignees,
-        created_at=_ensure_utc(pygh_issue.created_at) or datetime.now(timezone.utc),
-        updated_at=_ensure_utc(pygh_issue.updated_at) or datetime.now(timezone.utc),
-        association_reasons=[parsed_reason],
-        upvotes=upvotes,
-    )
 
 
 # ============================================================================

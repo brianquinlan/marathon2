@@ -1,6 +1,6 @@
 from datetime import datetime
 
-from pydantic import BaseModel, ConfigDict, Field, field_serializer
+from pydantic import BaseModel, ConfigDict, Field
 
 
 class User(BaseModel):
@@ -27,17 +27,9 @@ class User(BaseModel):
     # Additional custom associated metadata
     custom_data: dict[str, object] = Field(default_factory=dict)
 
-    # Timestamps (can be datetime, ISO string, or Firestore SERVER_TIMESTAMP Sentinel)
-    created_at: datetime | str | object | None = None
-    updated_at: datetime | str | object | None = None
-
-    @field_serializer("created_at", "updated_at", when_used="json")
-    def serialize_timestamps(self, v: datetime | str | object | None) -> str | None:
-        if v is None:
-            return None
-        if isinstance(v, datetime):
-            return v.isoformat()
-        return str(v)
+    # Timestamps
+    created_at: datetime | None = None
+    updated_at: datetime | None = None
 
     @classmethod
     def from_auth_token(

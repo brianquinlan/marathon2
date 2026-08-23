@@ -11,7 +11,7 @@ from datetime import datetime
 
 from firebase_admin import functions as admin_functions
 from google.cloud import firestore
-from pydantic import BaseModel, ConfigDict, field_serializer
+from pydantic import BaseModel, ConfigDict
 
 from genai_ranker import run_ranker
 
@@ -39,16 +39,8 @@ class Task(BaseModel):
     github_issue_url: str | None = None  # Optional direct URL copied from GitHub issue
     github_issue_upvotes: int = 0  # Number of +1 upvotes / reactions on the GitHub issue
     association_reasons: list[str] = []
-    created_at: datetime | str | object | None = None
-    updated_at: datetime | str | object | None = None
-
-    @field_serializer("created_at", "updated_at", when_used="json")
-    def serialize_timestamps(self, v: datetime | str | object | None) -> str | None:
-        if v is None:
-            return None
-        if isinstance(v, datetime):
-            return v.isoformat()
-        return str(v)
+    created_at: datetime | None = None
+    updated_at: datetime | None = None
 
     @property
     def doc_id(self) -> str:

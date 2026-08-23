@@ -17,13 +17,13 @@ Essential context, architectural rules, and operational workflows for AI agents 
 marathon2/
 ├── functions/
 │   ├── main.py              # Cloud Functions (Callable, HTTP, Task Queue, Firestore Triggers)
-│   ├── github_sync.py       # PyGithub client, issue/comment adaptors, pagination sync
+│   ├── github_sync.py       # PyGithub client, in-memory issue fetcher, pagination sync
 │   ├── genai_ranker.py      # Pydantic AI task priority ranker (synchronous run_sync)
 │   ├── task.py              # Task Pydantic model & Firestore task operations
 │   ├── user.py              # User Pydantic model & auth token extraction
 │   └── auth_utils.py        # Token verification & OAuth provider parsing
 ├── test_backend.py          # Auth & callable endpoint tests
-├── test_github.py           # GitHub sync & PyGithub adaptor tests
+├── test_github.py           # GitHub sync & pagination tests
 ├── test_task.py             # Task lifecycle & Pydantic AI ranking tests
 ├── pyproject.toml           # Hatch project configuration, Ruff settings, test scripts
 └── pyrightconfig.json       # Pyright configuration using functions/venv

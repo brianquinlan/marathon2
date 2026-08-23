@@ -103,6 +103,24 @@ class TestTaskModel(unittest.TestCase):
         self.assertEqual(dumped["owner"], "dart-lang")
         self.assertEqual(dumped["issue_number"], 1956)
 
+    def test_task_timestamps_handling(self):
+        from datetime import datetime, timezone
+
+        now = datetime(2026, 8, 23, 10, 0, 0, tzinfo=timezone.utc)
+        task = Task.model_validate(
+            {
+                "github_issue_id": "org_repo_1",
+                "created_at": now.isoformat(),
+                "updated_at": "2026-08-23T10:05:00Z",  # Pydantic string coercion
+            }
+        )
+        self.assertEqual(task.created_at, now)
+        self.assertIsInstance(task.updated_at, datetime)
+        self.assertEqual(task.updated_at, datetime(2026, 8, 23, 10, 5, 0, tzinfo=timezone.utc))
+
+        json_str = task.model_dump_json()
+        self.assertIn('"created_at":"2026-08-23T10:00:00Z"', json_str.replace("+00:00", "Z"))
+
 
 class TestRankerEngine(unittest.TestCase):
     def test_run_ranker_with_pydantic_ai_agent(self):
