@@ -163,9 +163,28 @@ class TestRankerEngine(unittest.TestCase):
         mock_provider_cls.assert_called_with(api_key="custom_key_12345")
         self.assertEqual(agent, mock_agent_instance)
 
-    def test_run_ranker_raises_on_error(self):
+    @patch("time.sleep", return_value=None)
+    def test_run_ranker_retries_on_rate_limit(self, mock_sleep):
         mock_agent = MagicMock()
-        mock_agent.run_sync.side_effect = RuntimeError("API quota exceeded or network error")
+        mock_res = MagicMock()
+        mock_res.output = TaskPriorityOutput(priority=0.85, reasoning="High urgency after retry")
+        # First call fails with 429 rate limit, second succeeds
+        mock_agent.run_sync.side_effect = [
+            RuntimeError("429 Too Many Requests: Resource has been exhausted"),
+            mock_res,
+        ]
+
+        task = Task(id="task_retry", priority=0.0, priority_needs_updated=True)
+        ranked = run_ranker(task=task, gemini_api_key="key", agent=mock_agent)
+        self.assertEqual(ranked.priority, 0.85)
+        self.assertFalse(ranked.priority_needs_updated)
+        self.assertEqual(mock_agent.run_sync.call_count, 2)
+        mock_sleep.assert_called_once()
+
+    @patch("time.sleep", return_value=None)
+    def test_run_ranker_raises_on_error(self, mock_sleep):
+        mock_agent = MagicMock()
+        mock_agent.run_sync.side_effect = RuntimeError("Non-recoverable fatal error")
 
         task = Task(id="task_err", priority=0.65, priority_needs_updated=True)
         with self.assertRaises(RuntimeError):
@@ -324,14 +343,14 @@ class TestTaskFirestoreOperations(unittest.TestCase):
         args, _kwargs = mock_queue.enqueue.call_args
         self.assertEqual(args[0], {"uid": "user_task_queue_1", "task_id": "task_abc_1"})
 
-    @patch("threading.Thread")
-    def test_enqueue_task_ranking_fallback_dispatch(self, mock_thread):
+    @patch("task._ranking_executor.submit")
+    def test_enqueue_task_ranking_fallback_dispatch(self, mock_submit):
         mock_db = MagicMock()
         res = enqueue_task_ranking(uid="user_async_1", task_id="task_fallback_1", db=mock_db)
         self.assertEqual(res["status"], "enqueued")
         self.assertEqual(res["uid"], "user_async_1")
         self.assertEqual(res["target_task_id"], "task_fallback_1")
-        mock_thread.assert_called_once()
+        mock_submit.assert_called_once()
 
     def test_get_user_tasks_sorted_by_priority(self):
         mock_db = MagicMock()

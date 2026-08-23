@@ -18,6 +18,9 @@
   {% if is_authenticated %}
     <header>
       <span>{{ user.email or user.display_name or user.uid }}</span>
+      <form method="POST" action="/" style="display: inline; margin: 0;">
+        <button type="submit">Rerank All</button>
+      </form>
       <a href="/settings">Settings</a>
       <button id="btn-logout">Sign Out</button>
     </header>

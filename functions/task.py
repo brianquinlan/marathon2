@@ -5,8 +5,8 @@ and dispatches asynchronous ranking tasks using Firebase Task Queue Functions (f
 See: https://firebase.google.com/docs/functions/task-functions#python
 """
 
+import concurrent.futures
 import logging
-import threading
 from datetime import datetime
 
 from firebase_admin import functions as admin_functions
@@ -16,6 +16,8 @@ from pydantic import BaseModel, ConfigDict, field_serializer
 from genai_ranker import run_ranker
 
 logger = logging.getLogger(__name__)
+
+_ranking_executor = concurrent.futures.ThreadPoolExecutor(max_workers=3, thread_name_prefix="ranking-worker")
 
 
 class Task(BaseModel):
@@ -105,7 +107,7 @@ def enqueue_task_ranking(
     except Exception as e:
         logger.warning(f"Firebase task_queue.enqueue exception ({e}). Handling fallback dispatch.")
         # In local emulator or unauthenticated testing environments without Cloud Tasks credentials,
-        # dispatch asynchronously via thread if db client is provided
+        # dispatch asynchronously via bounded thread pool if db client is provided
         if db is not None:
 
             def async_worker():
@@ -114,8 +116,7 @@ def enqueue_task_ranking(
                 except Exception as ex:
                     logger.error(f"Error in async ranking worker for task {task_id} (UID {uid}): {ex}")
 
-            thread = threading.Thread(target=async_worker, daemon=True)
-            thread.start()
+            _ranking_executor.submit(async_worker)
 
         return {
             "status": "enqueued",

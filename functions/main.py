@@ -46,7 +46,7 @@ db: firestore.Client = firestore.Client()
 # ============================================================================
 
 
-@https_fn.on_request(cors=options.CorsOptions(cors_origins="*", cors_methods=["get", "options"]))
+@https_fn.on_request(cors=options.CorsOptions(cors_origins="*", cors_methods=["get", "post", "options"]))
 def render_main_page(req: https_fn.Request) -> Response:
     """
     Renders the static ranked tasks list for developer debugging using Jinja2 templates.
@@ -81,13 +81,25 @@ def render_main_page(req: https_fn.Request) -> Response:
     if not user_data:
         user_data = {"uid": uid, "email": decoded_token.get("email"), "display_name": decoded_token.get("name")}
 
+    if req.method == "POST":
+        force_rerank_tasks(uid=uid, db=db)
+
     # Fetch tasks from users/{uid}/tasks
     tasks_col = db.collection("users").document(uid).collection("tasks")
     tasks_docs = tasks_col.stream()
     tasks_list: list[dict[str, object]] = []
+    unranked_task_ids: list[str] = []
     for doc in tasks_docs:
         t_data = doc.to_dict() or {}
         tasks_list.append(t_data)
+        if t_data.get("priority_needs_updated"):
+            raw_id = t_data.get("id") or doc.id
+            if raw_id:
+                unranked_task_ids.append(str(raw_id))
+
+    # Auto-dispatch ranking for any tasks that need ranking
+    for unranked_id in unranked_task_ids:
+        enqueue_task_ranking(uid=uid, task_id=unranked_id, db=db)
 
     # Sort descending from highest to lowest priority
     tasks_list.sort(key=lambda t: float(t.get("priority") or 0.0), reverse=True)  # type: ignore
