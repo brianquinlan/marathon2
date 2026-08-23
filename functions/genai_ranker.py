@@ -3,7 +3,6 @@ GenAI Task Ranking Module using Pydantic AI and Google Gemini Flash.
 Evaluates individual tasks with GitHub issue metadata, comments, and username mentions.
 """
 
-from pydantic import ConfigDict
 from __future__ import annotations
 
 import json
@@ -14,7 +13,7 @@ import threading
 import time
 from typing import Protocol, TypeVar
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 from pydantic_ai import Agent
 from pydantic_ai.models.google import GoogleModel
 from pydantic_ai.providers.google import GoogleProvider
@@ -40,14 +39,13 @@ class IssuePayload(BaseModel):
     issue: dict[str, object] = Field(default_factory=dict)
     comments: list[dict[str, object]] = Field(default_factory=list)
 
+
 class TaskProtocol(Protocol):
     @property
     def doc_id(self) -> str: ...
 
     priority: float
     priority_needs_updated: bool
-    github_issue_title: str | None
-    github_issue_upvotes: int
 
 
 TTask = TypeVar("TTask", bound=TaskProtocol)

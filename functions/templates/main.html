@@ -40,11 +40,11 @@
         <tbody>
           {% for task in tasks %}
             <tr>
-              <td>{{ task.github_issue_id or task.issue_id or "" }}</td>
+              <td>{{ (task.owner ~ "/" ~ task.repo ~ "#" ~ task.issue_number) if (task.owner and task.repo and task.issue_number) else (task.id or "") }}</td>
               <td>{{ "%.2f"|format(task.priority or 0.0) }}</td>
               <td>
-                <a href="{{ task.github_issue_url or task.issue_url or '#' }}" target="_blank" rel="noopener noreferrer">
-                  {{ task.github_issue_title or task.title or task.github_issue_id or task.issue_id or "Untitled Task" }}
+                <a href="{{ task.github_issue_url or '#' }}" target="_blank" rel="noopener noreferrer">
+                  {{ task.github_issue_title or "Untitled Task" }}
                 </a>
               </td>
               <td>{{ "Needs Rerank" if task.priority_needs_updated else "Ranked" }}</td>

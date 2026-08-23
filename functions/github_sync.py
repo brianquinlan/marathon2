@@ -22,19 +22,14 @@ from github import Auth, Github, GithubException, GithubObject
 from github.Issue import Issue as PyghIssue
 from github.PaginatedList import PaginatedList
 from google.cloud import firestore
-from pydantic import BaseModel, ConfigDict, Field
 
+from genai_ranker import IssuePayload
 from task import ensure_task_for_issue
 from user import User
 
 logger = logging.getLogger(__name__)
 
 GITHUB_API_BASE_URL = "https://api.github.com"
-
-
-class IssueType(str, Enum):
-    ISSUE = "issue"
-    PULL_REQUEST = "pull_request"
 
 
 class AssociationReason(str, Enum):
@@ -46,18 +41,6 @@ class AssociationReason(str, Enum):
     MENTIONED = "mentioned"
     CREATED = "created"
     MONITORED_REPO = "monitored_repo"
-
-
-class IssuePayload(BaseModel):
-    """
-    Structured container holding the raw GitHub Issue and Comments JSON payloads.
-    Directly passable to Pydantic AI / Gemini for ranking without manual field extraction.
-    """
-
-    model_config = ConfigDict(arbitrary_types_allowed=True)
-
-    issue: dict[str, object] = Field(default_factory=dict)
-    comments: list[dict[str, object]] = Field(default_factory=list)
 
 
 def _safe_int(val: object, default: int = 0) -> int:
@@ -302,29 +285,12 @@ def process_and_save_issue_page(
         clean_repo = re.sub(r"[^a-zA-Z0-9_-]", "_", str(repo))
         doc_id = f"{clean_owner}_{clean_repo}_{issue_number}"
 
-        is_pr = "pull_request" in item or "pull_request" in str(item.get("html_url", ""))
-        issue_type = IssueType.PULL_REQUEST if is_pr else IssueType.ISSUE
-
-        raw_reactions = item.get("reactions")
-        upvotes = 0
-        if isinstance(raw_reactions, dict):
-            upvotes = _safe_int(raw_reactions.get("+1"), 0)
-
-        parsed_reason = (
-            AssociationReason(reason)
-            if isinstance(reason, str) and reason in AssociationReason._value2member_map_
-            else (reason if isinstance(reason, AssociationReason) else AssociationReason.ASSIGNED)
-        )
-
         issue_payload: dict[str, object] = {
             "title": str(item["title"]) if item.get("title") is not None else None,
             "url": str(item.get("html_url") or item.get("url") or ""),
             "owner": owner,
             "repo": repo,
             "issue_number": issue_number,
-            "upvotes": upvotes,
-            "issue_type": issue_type.value,
-            "association_reasons": [parsed_reason.value],
         }
 
         # Create/update Task directly in Firestore

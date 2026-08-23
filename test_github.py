@@ -150,9 +150,9 @@ class TestPageProcessingAndDirectTaskCreation(unittest.TestCase):
             self.assertEqual(mock_ensure_task.call_count, 2)
             # Verify ensure_task_for_issue was called with correct payload
             call1_args = mock_ensure_task.call_args_list[0][1]
-            self.assertEqual(call1_args["issue_id"], "org_repo_10")
-            self.assertEqual(call1_args["issue_data"]["title"], "Bug fix issue")
-            self.assertEqual(call1_args["issue_data"]["upvotes"], 3)
+            self.assertEqual(call1_args["issue_data"]["owner"], "org")
+            self.assertEqual(call1_args["issue_data"]["repo"], "repo")
+            self.assertEqual(call1_args["issue_data"]["issue_number"], 10)
 
 
 class TestInitialSyncDispatcher(unittest.TestCase):
