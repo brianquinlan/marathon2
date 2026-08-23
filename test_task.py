@@ -47,27 +47,28 @@ class TestTaskModel(unittest.TestCase):
             id="task_owner_repo_1",
             priority=0.85,
             priority_needs_updated=True,
-            issue_id="owner_repo_1",
+            github_issue_id="owner_repo_1",
             uid="user_123",
-            title="Fix high priority bug",
-            issue_url="https://github.com/owner/repo/issues/1"
+            github_issue_title="Fix high priority bug",
+            github_issue_url="https://github.com/owner/repo/issues/1"
         )
         self.assertEqual(task.doc_id, "task_owner_repo_1")
         self.assertEqual(task.priority, 0.85)
         self.assertTrue(task.priority_needs_updated)
-        self.assertEqual(task.issue_id, "owner_repo_1")
+        self.assertEqual(task.github_issue_id, "owner_repo_1")
 
         # Test Pydantic JSON serialization
         json_str = task.model_dump_json()
         self.assertIn('"priority":0.85', json_str.replace(" ", ""))
-        self.assertIn('"title":"Fix high priority bug"', json_str)
+        self.assertIn('"github_issue_title":"Fix high priority bug"', json_str)
         
         # Test dictionary conversion via model_dump
         dumped = task.model_dump()
         self.assertEqual(dumped["id"], "task_owner_repo_1")
         self.assertEqual(dumped["priority"], 0.85)
         self.assertTrue(dumped["priority_needs_updated"])
-        self.assertEqual(dumped["title"], "Fix high priority bug")
+        self.assertEqual(dumped["github_issue_title"], "Fix high priority bug")
+        self.assertEqual(dumped["github_issue_url"], "https://github.com/owner/repo/issues/1")
 
         # Test reconstruction via model_validate
         reconstructed = Task.model_validate(dumped)
@@ -82,15 +83,15 @@ class TestTaskModel(unittest.TestCase):
         mock_ref = FakeDocRef()
 
         task = Task(
-            issue_id="owner_repo_1",
-            issue_ref=mock_ref,
+            github_issue_id="owner_repo_1",
+            github_issue_ref=mock_ref,
             uid="user_123"
         )
         self.assertEqual(task.doc_id, "task_owner_repo_1")
 
         d_dump = task.model_dump()
-        self.assertIn("issue_ref", d_dump)
-        self.assertEqual(d_dump["issue_ref"], mock_ref)
+        self.assertIn("github_issue_ref", d_dump)
+        self.assertEqual(d_dump["github_issue_ref"], mock_ref)
 
 
 class TestRankerEngine(unittest.TestCase):
@@ -130,7 +131,8 @@ class TestTaskFirestoreOperations(unittest.TestCase):
         )
         self.assertEqual(task.doc_id, "task_org_repo_1")
         self.assertTrue(task.priority_needs_updated)
-        self.assertEqual(task.title, "Brand new issue")
+        self.assertEqual(task.github_issue_title, "Brand new issue")
+        self.assertEqual(task.github_issue_url, "https://github.com/org/repo/issues/1")
         mock_task_ref.set.assert_called_once()
 
         # Case 2: Task already exists (modified issue -> sets priority_needs_updated = True)
@@ -139,8 +141,8 @@ class TestTaskFirestoreOperations(unittest.TestCase):
             "id": "task_org_repo_1",
             "priority": 0.7,
             "priority_needs_updated": False,
-            "issue_id": "org_repo_1",
-            "title": "Old title"
+            "github_issue_id": "org_repo_1",
+            "github_issue_title": "Old title"
         }
         mock_task_ref.set.reset_mock()
 
@@ -151,7 +153,7 @@ class TestTaskFirestoreOperations(unittest.TestCase):
             db=mock_db
         )
         self.assertTrue(updated_task.priority_needs_updated)
-        self.assertEqual(updated_task.title, "Updated issue title")
+        self.assertEqual(updated_task.github_issue_title, "Updated issue title")
         self.assertEqual(updated_task.priority, 0.7)
         mock_task_ref.set.assert_called_once()
 

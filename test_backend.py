@@ -326,16 +326,16 @@ class TestJinjaMainPageRendering(unittest.TestCase):
         mock_tasks_col = MagicMock()
         mock_task1 = MagicMock()
         mock_task1.to_dict.return_value = {
-            "title": "Lower Priority Task",
+            "github_issue_title": "Lower Priority Task",
             "priority": 0.30,
-            "issue_url": "https://github.com/org/repo/issues/1",
+            "github_issue_url": "https://github.com/org/repo/issues/1",
             "priority_needs_updated": False
         }
         mock_task2 = MagicMock()
         mock_task2.to_dict.return_value = {
-            "title": "Top Priority Task",
+            "github_issue_title": "Top Priority Task",
             "priority": 0.95,
-            "issue_url": "https://github.com/org/repo/issues/2",
+            "github_issue_url": "https://github.com/org/repo/issues/2",
             "priority_needs_updated": True
         }
         mock_tasks_col.stream.return_value = [mock_task1, mock_task2]

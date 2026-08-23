@@ -40,8 +40,8 @@
               <td>#{{ loop.index }}</td>
               <td>{{ "%.2f"|format(task.priority or 0.0) }}</td>
               <td>
-                <a href="{{ task.issue_url or '#' }}" target="_blank" rel="noopener noreferrer">
-                  {{ task.title or task.issue_id or "Untitled Task" }}
+                <a href="{{ task.github_issue_url or task.issue_url or '#' }}" target="_blank" rel="noopener noreferrer">
+                  {{ task.github_issue_title or task.title or task.github_issue_id or task.issue_id or "Untitled Task" }}
                 </a>
               </td>
               <td>{{ "Needs Rerank" if task.priority_needs_updated else "Ranked" }}</td>

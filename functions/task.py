@@ -27,12 +27,12 @@ class Task(BaseModel):
 
     priority: float = 0.0  # A priority value between 0.0 and 1.0
     priority_needs_updated: bool = True
-    issue_ref: Optional[Any] = None  # Native Firestore DocumentReference or resource path
-    issue_id: Optional[str] = None  # Direct string key (e.g. owner_repo_number)
+    github_issue_ref: Optional[Any] = None  # Native Firestore DocumentReference or resource path
+    github_issue_id: Optional[str] = None  # Direct string key (e.g. owner_repo_number)
     uid: Optional[str] = None  # Owner user ID
-    id: Optional[str] = None  # Task document ID (e.g. task_{issue_id})
-    title: Optional[str] = None  # Optional cached title for rapid client listing
-    issue_url: Optional[str] = None  # Optional direct URL to the GitHub issue
+    id: Optional[str] = None  # Task document ID (e.g. task_{github_issue_id})
+    github_issue_title: Optional[str] = None  # Optional cached title copied from GitHub issue
+    github_issue_url: Optional[str] = None  # Optional direct URL copied from GitHub issue
     created_at: Optional[Any] = None
     updated_at: Optional[Any] = None
 
@@ -41,8 +41,8 @@ class Task(BaseModel):
         """Standardized document ID for Firestore."""
         if self.id:
             return self.id
-        if self.issue_id:
-            return f"task_{self.issue_id}"
+        if self.github_issue_id:
+            return f"task_{self.github_issue_id}"
         return "task_unknown"
 
 
@@ -134,19 +134,20 @@ def ensure_task_for_issue(
     if doc_snap.exists:
         task = Task.model_validate({**(doc_snap.to_dict() or {}), "id": task_doc_id})
         task.priority_needs_updated = True
-        task.title = issue_title or task.title
-        task.issue_url = issue_url or task.issue_url
-        task.issue_ref = issue_ref
+        task.github_issue_title = issue_title or task.github_issue_title
+        task.github_issue_url = issue_url or task.github_issue_url
+        task.github_issue_ref = issue_ref
+        task.github_issue_id = issue_id
     else:
         task = Task(
             id=task_doc_id,
             priority=0.0,
             priority_needs_updated=True,
-            issue_ref=issue_ref,
-            issue_id=issue_id,
+            github_issue_ref=issue_ref,
+            github_issue_id=issue_id,
             uid=uid,
-            title=issue_title,
-            issue_url=issue_url,
+            github_issue_title=issue_title,
+            github_issue_url=issue_url,
         )
 
     task_data = task.model_dump()
