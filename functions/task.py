@@ -54,8 +54,8 @@ class Task(BaseModel):
 def enqueue_task_ranking(
     uid: str,
     task_id: str,
+    db: firestore.Client,
     function_name: str = "rank_user_tasks",
-    db: firestore.Client | None = None,
     opts: admin_functions.TaskOptions | None = None,
 ) -> dict[str, object]:
     """
@@ -80,16 +80,15 @@ def enqueue_task_ranking(
     except Exception as e:
         logger.warning(f"Firebase task_queue.enqueue exception ({e}). Handling fallback dispatch.")
         # In local emulator or unauthenticated testing environments without Cloud Tasks credentials,
-        # dispatch asynchronously via bounded thread pool if db client is provided
-        if db is not None:
+        # dispatch asynchronously via bounded thread pool
 
-            def async_worker():
-                try:
-                    update_task_priority(uid=uid, task_id=task_id, db=db)
-                except Exception as ex:
-                    logger.error(f"Error in async ranking worker for task {task_id} (UID {uid}): {ex}")
+        def async_worker():
+            try:
+                update_task_priority(uid=uid, task_id=task_id, db=db)
+            except Exception as ex:
+                logger.error(f"Error in async ranking worker for task {task_id} (UID {uid}): {ex}")
 
-            _ranking_executor.submit(async_worker)
+        _ranking_executor.submit(async_worker)
 
         return {
             "status": "enqueued",

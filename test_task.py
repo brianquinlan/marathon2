@@ -346,7 +346,10 @@ class TestTaskFirestoreOperations(unittest.TestCase):
         mock_queue.enqueue.return_value = "task_id_xyz_123"
         mock_task_queue.return_value = mock_queue
 
-        res = enqueue_task_ranking(uid="user_task_queue_1", task_id="task_abc_1", function_name="rank_user_tasks")
+        mock_db = MagicMock()
+        res = enqueue_task_ranking(
+            uid="user_task_queue_1", task_id="task_abc_1", db=mock_db, function_name="rank_user_tasks"
+        )
         self.assertEqual(res["status"], "enqueued")
         self.assertEqual(res["task_id"], "task_id_xyz_123")
         self.assertEqual(res["target_task_id"], "task_abc_1")
