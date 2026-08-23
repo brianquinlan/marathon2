@@ -11,7 +11,7 @@ import os
 import threading
 from typing import Any, Dict, List, Optional
 import logging
-from pydantic import BaseModel, Field, ConfigDict
+from pydantic import BaseModel, Field, ConfigDict, field_serializer
 from google.cloud import firestore
 import firebase_admin
 from firebase_admin import functions as admin_functions
@@ -35,6 +35,22 @@ class Task(BaseModel):
     github_issue_url: Optional[str] = None  # Optional direct URL copied from GitHub issue
     created_at: Optional[Any] = None
     updated_at: Optional[Any] = None
+
+    @field_serializer("github_issue_ref", when_used="json")
+    def serialize_issue_ref(self, v: Any) -> Optional[str]:
+        if v is None:
+            return None
+        if hasattr(v, "path"):
+            return str(v.path)
+        return str(v)
+
+    @field_serializer("created_at", "updated_at", when_used="json")
+    def serialize_timestamps(self, v: Any) -> Optional[str]:
+        if v is None:
+            return None
+        if isinstance(v, datetime):
+            return v.isoformat()
+        return str(v)
 
     @property
     def doc_id(self) -> str:

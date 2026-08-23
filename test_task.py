@@ -94,6 +94,13 @@ class TestTaskModel(unittest.TestCase):
         self.assertIn("github_issue_ref", d_dump)
         self.assertEqual(d_dump["github_issue_ref"], mock_ref)
 
+        # Test JSON serialization mode
+        json_dump = task.model_dump(mode="json")
+        self.assertEqual(json_dump["github_issue_ref"], "users/user_123/issues/owner_repo_1")
+
+        json_str = task.model_dump_json()
+        self.assertIn('"github_issue_ref":"users/user_123/issues/owner_repo_1"', json_str.replace(" ", ""))
+
 
 class TestRankerEngine(unittest.TestCase):
 
