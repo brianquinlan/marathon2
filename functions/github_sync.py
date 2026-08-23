@@ -1,6 +1,6 @@
 """
-GitHub integration module for fetching and storing user-associated issues and comments in Cloud Firestore.
-Uses asynchronous chained Firebase Task Queue Functions (with seamless local emulator fallback) for:
+GitHub integration module using PyGithub for fetching and storing user-associated issues and comments in Cloud Firestore.
+Uses asynchronous chained Firebase Task Queue Functions (with seamless local fallback) for:
 1. Assigned issues (filter=assigned)
 2. Mentioned issues (filter=mentioned)
 3. Created issues (filter=created)
@@ -16,11 +16,15 @@ import re
 import threading
 from typing import Dict, List, Mapping, Optional, Set, Tuple, Union
 import logging
-import requests
 from pydantic import BaseModel, Field, ConfigDict
 from google.cloud import firestore
 import firebase_admin
 from firebase_admin import functions as admin_functions
+
+from github import Github, Auth, GithubException, GithubObject
+from github.Issue import Issue as PyghIssue
+from github.IssueComment import IssueComment as PyghComment
+from github.PaginatedList import PaginatedList
 
 from user import User
 from task import ensure_task_for_issue
@@ -104,6 +108,21 @@ class Issue(BaseModel):
         return self.created_at
 
 
+def _safe_int(val: object, default: int = 0) -> int:
+    """Safely converts an object to int or returns default."""
+    if isinstance(val, int):
+        return val
+    if isinstance(val, str) and (val.isdigit() or (val.startswith("-") and val[1:].isdigit())):
+        return int(val)
+    return default
+
+
+def _ensure_utc(dt_val: Optional[datetime]) -> Optional[datetime]:
+    if dt_val is None:
+        return None
+    return dt_val if dt_val.tzinfo else dt_val.replace(tzinfo=timezone.utc)
+
+
 def _parse_github_datetime(dt_val: Optional[Union[datetime, str, object]]) -> Optional[datetime]:
     """Parses ISO 8601 strings or timestamp objects into UTC datetime objects."""
     if not dt_val:
@@ -144,33 +163,237 @@ def _extract_owner_and_repo(issue_data: Dict[str, object]) -> Tuple[str, str]:
 
 
 # ============================================================================
-# Single-Page Fetching Helpers (with Next Link parsing)
+# PyGithub Client & Adaptors
+# ============================================================================
+
+def get_github_client(access_token: str) -> Github:
+    """
+    Creates an authenticated PyGithub client instance.
+    """
+    auth = Auth.Token(access_token)
+    return Github(auth=auth, timeout=20, user_agent="Firebase-GitHub-Sync-App")
+
+
+def comment_from_pygithub(pygh_comment: PyghComment) -> Comment:
+    """
+    Converts a PyGithub IssueComment object to our internal Comment model.
+    """
+    author = "unknown"
+    if pygh_comment.user:
+        author = pygh_comment.user.login or "unknown"
+    return Comment(
+        id=pygh_comment.id,
+        user_login=author,
+        body=pygh_comment.body or "",
+        created_at=_ensure_utc(pygh_comment.created_at),
+        updated_at=_ensure_utc(pygh_comment.updated_at),
+    )
+
+
+def issue_from_pygithub(
+    pygh_issue: PyghIssue,
+    reason: Union[AssociationReason, str],
+    owner_fallback: Optional[str] = None,
+    repo_fallback: Optional[str] = None
+) -> Issue:
+    """
+    Converts a PyGithub Issue object to our internal Issue model.
+    """
+    owner = owner_fallback or "unknown"
+    repo = repo_fallback or "unknown"
+    if pygh_issue.repository:
+        if pygh_issue.repository.owner:
+            owner = pygh_issue.repository.owner.login or owner
+        repo = pygh_issue.repository.name or repo
+
+    is_pr = pygh_issue.pull_request is not None
+    issue_type = IssueType.PULL_REQUEST if is_pr else IssueType.ISSUE
+    author = pygh_issue.user.login if pygh_issue.user else "unknown"
+    assignees: List[str] = []
+    if pygh_issue.assignees:
+        assignees = [str(a.login) for a in pygh_issue.assignees if a and a.login]
+
+    parsed_reason = (
+        AssociationReason(reason)
+        if isinstance(reason, str) and reason in AssociationReason._value2member_map_
+        else (reason if isinstance(reason, AssociationReason) else AssociationReason.ASSIGNED)
+    )
+
+    comments_url = pygh_issue.comments_url or f"{GITHUB_API_BASE_URL}/repos/{owner}/{repo}/issues/{pygh_issue.number}/comments"
+
+    return Issue(
+        url=str(pygh_issue.html_url or f"https://github.com/{owner}/{repo}/issues/{pygh_issue.number}"),
+        owner=owner,
+        repo=repo,
+        issue_number=pygh_issue.number,
+        number=pygh_issue.number,
+        title=pygh_issue.title,
+        issue_type=issue_type,
+        state=pygh_issue.state or "open",
+        comments_url=str(comments_url),
+        body=pygh_issue.body,
+        user_login=author,
+        assignee_logins=assignees,
+        created_at=_ensure_utc(pygh_issue.created_at) or datetime.now(timezone.utc),
+        updated_at=_ensure_utc(pygh_issue.updated_at) or datetime.now(timezone.utc),
+        association_reasons=[parsed_reason],
+    )
+
+
+# ============================================================================
+# PyGithub Single-Page Fetching Helpers
+# ============================================================================
+
+def fetch_single_issue_page_pygithub(
+    client: Github,
+    filter_name: Optional[str] = None,
+    repo_full_name: Optional[str] = None,
+    state: str = "open",
+    since: Optional[datetime] = None,
+    page: int = 0,
+    per_page: int = 100
+) -> Tuple[List[PyghIssue], bool]:
+    """
+    Fetches a single page (0-indexed) of issues using PyGithub PaginatedList.
+    Returns (items, has_next_page).
+    """
+    try:
+        if repo_full_name:
+            repo = client.get_repo(repo_full_name)
+            paginated: PaginatedList[PyghIssue] = repo.get_issues(
+                state=state,
+                since=since or GithubObject.NotSet,
+                sort="updated",
+                direction="desc"
+            )
+        else:
+            paginated = client.get_user().get_issues(
+                filter=filter_name or "assigned",
+                state=state,
+                since=since or GithubObject.NotSet,
+                sort="updated",
+                direction="desc"
+            )
+        items = list(paginated.get_page(page))
+        has_next = len(items) >= per_page
+        return items, has_next
+    except GithubException as e:
+        if e.status in (401, 403):
+            raise PermissionError(f"GitHub API authorization error ({e.status}): {e.data}")
+        elif e.status == 404:
+            logger.warning(f"GitHub repository/endpoint not found: {repo_full_name or filter_name}")
+            return [], False
+        raise
+    except Exception as e:
+        logger.error(f"Error fetching issue page (page={page}): {e}")
+        return [], False
+
+
+def fetch_single_comment_page_pygithub(
+    client: Github,
+    owner: str,
+    repo: str,
+    issue_number: int,
+    since: Optional[datetime] = None,
+    page: int = 0,
+    per_page: int = 100
+) -> Tuple[List[Comment], bool]:
+    """
+    Fetches a single page (0-indexed) of comments for an issue using PyGithub.
+    Returns (comments, has_next_page).
+    """
+    try:
+        repository = client.get_repo(f"{owner}/{repo}")
+        issue = repository.get_issue(issue_number)
+        paginated: PaginatedList[PyghComment] = issue.get_comments(since=since or GithubObject.NotSet)
+        pygh_comments = list(paginated.get_page(page))
+        comments = [comment_from_pygithub(c) for c in pygh_comments]
+        has_next = len(pygh_comments) >= per_page
+        return comments, has_next
+    except GithubException as e:
+        if e.status in (401, 403):
+            raise PermissionError(f"GitHub API authorization error ({e.status}): {e.data}")
+        elif e.status == 404:
+            return [], False
+        raise
+    except Exception as e:
+        logger.error(f"Error fetching comments for {owner}/{repo}#{issue_number} (page={page}): {e}")
+        return [], False
+
+
+# ============================================================================
+# Backwards-Compatible Page Fetching Helpers (used in existing sync flows)
 # ============================================================================
 
 def fetch_single_issue_page(
     url: str,
     headers: Dict[str, str],
-    params: Optional[Mapping[str, object]] = None
+    params: Optional[Mapping[str, object]] = None,
+    client: Optional[Github] = None
 ) -> Tuple[List[Dict[str, object]], Optional[str]]:
     """
-    Fetches a single page of issues from GitHub and returns (items, next_page_url).
+    Fetches a single page of issues and returns (raw_items_dict, next_page_url).
+    Delegates to PyGithub client when available.
     """
     try:
-        req_params = {k: str(v) for k, v in params.items() if v is not None} if params is not None else None
-        resp = requests.get(url, headers=headers, params=req_params, timeout=20)
-        if resp.status_code == 401:
-            raise PermissionError("Invalid or expired GitHub access token.")
-        elif resp.status_code == 403:
-            raise PermissionError(f"GitHub API rate limit exceeded or forbidden: {resp.text}")
-        elif resp.status_code == 404:
-            logger.warning(f"GitHub endpoint not found: {url}")
+        token = headers.get("Authorization", "").replace("Bearer ", "").replace("token ", "").strip()
+        g = client or (get_github_client(token) if token else None)
+        if not g:
             return [], None
 
-        resp.raise_for_status()
-        data = resp.json()
-        items = data if isinstance(data, list) else []
-        next_url = resp.links.get("next", {}).get("url")
-        return items, next_url
+        repo_match = re.search(r"repos/([^/]+)/([^/]+)/issues", url)
+        page = _safe_int(params.get("page"), default=0) if params else 0
+        per_page = _safe_int(params.get("per_page"), default=100) if params else 100
+        state = str(params.get("state", "open")) if params else "open"
+        since_raw = params.get("since") if params else None
+        since_dt = _parse_github_datetime(since_raw)
+
+        if repo_match:
+            owner, repo_name = repo_match.group(1), repo_match.group(2)
+            issues, has_next = fetch_single_issue_page_pygithub(
+                client=g,
+                repo_full_name=f"{owner}/{repo_name}",
+                state=state,
+                since=since_dt,
+                page=page,
+                per_page=per_page
+            )
+        else:
+            filter_name = str(params.get("filter", "assigned")) if params else "assigned"
+            issues, has_next = fetch_single_issue_page_pygithub(
+                client=g,
+                filter_name=filter_name,
+                state=state,
+                since=since_dt,
+                page=page,
+                per_page=per_page
+            )
+
+        items_dict: List[Dict[str, object]] = []
+        for it in issues:
+            raw_repo = {
+                "name": it.repository.name if it.repository else (repo_match.group(2) if repo_match else "unknown"),
+                "owner": {"login": it.repository.owner.login if it.repository and it.repository.owner else (repo_match.group(1) if repo_match else "unknown")}
+            }
+            raw_d: Dict[str, object] = {
+                "number": it.number,
+                "title": it.title,
+                "body": it.body,
+                "state": it.state,
+                "html_url": it.html_url,
+                "comments": it.comments,
+                "comments_url": it.comments_url,
+                "created_at": it.created_at.isoformat() if it.created_at else None,
+                "updated_at": it.updated_at.isoformat() if it.updated_at else None,
+                "user": {"login": it.user.login} if it.user else None,
+                "assignees": [{"login": a.login} for a in (it.assignees or []) if a and a.login],
+                "pull_request": bool(it.pull_request),
+                "repository": raw_repo,
+            }
+            items_dict.append(raw_d)
+
+        next_url = f"{url}?page={page + 1}" if has_next else None
+        return items_dict, next_url
     except PermissionError:
         raise
     except Exception as e:
@@ -181,29 +404,42 @@ def fetch_single_issue_page(
 def fetch_single_comment_page(
     comments_url: str,
     headers: Dict[str, str],
-    params: Optional[Mapping[str, object]] = None
+    params: Optional[Mapping[str, object]] = None,
+    client: Optional[Github] = None
 ) -> Tuple[List[Comment], Optional[str]]:
     """
-    Fetches a single page of comments from GitHub and returns (comments, next_page_url).
+    Fetches a single page of comments and returns (comments, next_page_url).
+    Delegates to PyGithub client when available.
     """
     try:
-        req_params = {k: str(v) for k, v in params.items() if v is not None} if params is not None else None
-        resp = requests.get(comments_url, headers=headers, params=req_params, timeout=15)
-        if resp.status_code in (401, 403):
-            raise PermissionError("GitHub API authorization error.")
-        elif resp.status_code == 404:
+        token = headers.get("Authorization", "").replace("Bearer ", "").replace("token ", "").strip()
+        g = client or (get_github_client(token) if token else None)
+        if not g:
             return [], None
 
-        resp.raise_for_status()
-        data = resp.json()
-        comments: List[Comment] = []
-        if isinstance(data, list):
-            for c in data:
-                if isinstance(c, dict):
-                    comments.append(Comment.from_api_dict(c))
+        match = re.search(r"repos/([^/]+)/([^/]+)/issues/(\d+)/comments", comments_url)
+        if not match:
+            return [], None
 
-        next_url = resp.links.get("next", {}).get("url")
+        owner, repo, issue_num = match.group(1), match.group(2), int(match.group(3))
+        page = _safe_int(params.get("page"), default=0) if params else 0
+        per_page = _safe_int(params.get("per_page"), default=100) if params else 100
+        since_raw = params.get("since") if params else None
+        since_dt = _parse_github_datetime(since_raw)
+
+        comments, has_next = fetch_single_comment_page_pygithub(
+            client=g,
+            owner=owner,
+            repo=repo,
+            issue_number=issue_num,
+            since=since_dt,
+            page=page,
+            per_page=per_page
+        )
+        next_url = f"{comments_url}?page={page + 1}" if has_next else None
         return comments, next_url
+    except PermissionError:
+        raise
     except Exception as e:
         logger.error(f"Error fetching comments from {comments_url}: {e}")
         return [], None
@@ -240,7 +476,7 @@ def process_and_save_issue_page(
 
         raw_num = item.get("number", 0)
         issue_number = int(raw_num) if isinstance(raw_num, (int, str)) and str(raw_num).isdigit() else 0
-        is_pr = "pull_request" in item and item["pull_request"] is not None
+        is_pr = bool(item.get("pull_request"))
         issue_type = IssueType.PULL_REQUEST if is_pr else IssueType.ISSUE
 
         comments_url = str(item.get("comments_url") or f"{GITHUB_API_BASE_URL}/repos/{owner}/{repo}/issues/{issue_number}/comments")
@@ -254,8 +490,9 @@ def process_and_save_issue_page(
                 if isinstance(a, dict) and a.get("login"):
                     assignees.append(str(a["login"]))
 
-        if not assignees and isinstance(item.get("assignee"), dict):
-            single_a = item["assignee"].get("login") # type: ignore
+        raw_single_a = item.get("assignee")
+        if not assignees and isinstance(raw_single_a, dict):
+            single_a = raw_single_a.get("login")
             if single_a:
                 assignees = [str(single_a)]
 
@@ -272,8 +509,8 @@ def process_and_save_issue_page(
         existing_comments: List[Comment] = []
         last_comment_time: Optional[datetime] = None
 
-        if getattr(doc_snap, "exists", False):
-            existing_data = doc_snap.to_dict() or {} if hasattr(doc_snap, "to_dict") else {}
+        if doc_snap.exists:
+            existing_data = doc_snap.to_dict() or {}
             for r in existing_data.get("association_reasons") or []:
                 if isinstance(r, str) and r in AssociationReason._value2member_map_:
                     reasons.add(AssociationReason(r))
@@ -346,11 +583,11 @@ def process_and_save_comment_page(
     issue_ref = db.collection("users").document(uid).collection("issues").document(issue_doc_id)
     doc_snap = issue_ref.get()
 
-    if not getattr(doc_snap, "exists", False):
+    if not doc_snap.exists:
         logger.warning(f"Cannot save comments: issue {issue_doc_id} not found for UID {uid}")
         return 0
 
-    existing_data = doc_snap.to_dict() or {} if hasattr(doc_snap, "to_dict") else {}
+    existing_data = doc_snap.to_dict() or {}
     existing_comments = [
         Comment.model_validate(c)
         for c in existing_data.get("comments", [])
@@ -415,10 +652,10 @@ def execute_issue_page_sync(
     """
     user_ref = db.collection("users").document(uid)
     doc_snap = user_ref.get()
-    if not getattr(doc_snap, "exists", False):
+    if not doc_snap.exists:
         return {"status": "error", "message": "User document not found."}
 
-    raw_user_dict = doc_snap.to_dict() or {} if hasattr(doc_snap, "to_dict") else {}
+    raw_user_dict = doc_snap.to_dict() or {}
     user = User.model_validate({**raw_user_dict, "uid": uid})
     if not user.github_access_token:
         return {"status": "error", "message": "User does not have github_access_token configured."}
@@ -429,7 +666,8 @@ def execute_issue_page_sync(
         "X-GitHub-Api-Version": "2022-11-28",
     }
 
-    items, next_url = fetch_single_issue_page(url=url, headers=headers, params=params)
+    client = get_github_client(user.github_access_token)
+    items, next_url = fetch_single_issue_page(url=url, headers=headers, params=params, client=client)
     saved_doc_ids = process_and_save_issue_page(
         uid=uid,
         raw_items=items,
@@ -459,7 +697,7 @@ def execute_issue_page_sync(
         raw_cc = item.get("comments", 0)
         comments_count = int(raw_cc) if isinstance(raw_cc, (int, str)) and str(raw_cc).isdigit() else 0
         if comments_count > 0:
-            comment_params: Dict[str, object] = {"per_page": 100}
+            comment_params: Dict[str, object] = {"per_page": 100, "page": 0}
             if user.last_assigned_issue_update_time:
                 comment_params["since"] = user.last_assigned_issue_update_time
             enqueue_comment_page_sync(
@@ -473,10 +711,14 @@ def execute_issue_page_sync(
     # Chain next page of issues if present
     next_task_id = None
     if next_url:
+        page_val = _safe_int(params.get("page"), default=0) if params else 0
+        next_params: Dict[str, object] = dict(params) if params else {}
+        next_params["page"] = page_val + 1
+
         next_task_id = enqueue_issue_page_sync(
             uid=uid,
-            url=next_url,
-            params=None,
+            url=url,
+            params=next_params,
             reason=reason,
             owner_fallback=owner_fallback,
             repo_fallback=repo_fallback,
@@ -504,10 +746,10 @@ def execute_comment_page_sync(
     """
     user_ref = db.collection("users").document(uid)
     doc_snap = user_ref.get()
-    if not getattr(doc_snap, "exists", False):
+    if not doc_snap.exists:
         return {"status": "error", "message": "User document not found."}
 
-    raw_user_dict = doc_snap.to_dict() or {} if hasattr(doc_snap, "to_dict") else {}
+    raw_user_dict = doc_snap.to_dict() or {}
     user = User.model_validate({**raw_user_dict, "uid": uid})
     if not user.github_access_token:
         return {"status": "error", "message": "User does not have github_access_token configured."}
@@ -518,10 +760,12 @@ def execute_comment_page_sync(
         "X-GitHub-Api-Version": "2022-11-28",
     }
 
+    client = get_github_client(user.github_access_token)
     comments, next_url = fetch_single_comment_page(
         comments_url=comments_url,
         headers=headers,
-        params=params
+        params=params,
+        client=client
     )
 
     saved_count = process_and_save_comment_page(
@@ -534,11 +778,15 @@ def execute_comment_page_sync(
 
     next_task_id = None
     if next_url:
+        page_val = _safe_int(params.get("page"), default=0) if params else 0
+        next_params: Dict[str, object] = dict(params) if params else {}
+        next_params["page"] = page_val + 1
+
         next_task_id = enqueue_comment_page_sync(
             uid=uid,
             issue_doc_id=issue_doc_id,
-            comments_url=next_url,
-            params=None,
+            comments_url=comments_url,
+            params=next_params,
             db=db
         )
         logger.info(f"Chained next comments page task {next_task_id} for issue {issue_doc_id}")
@@ -645,21 +893,17 @@ def enqueue_comment_page_sync(
 
 def fetch_github_user_login(access_token: str) -> Optional[str]:
     """
-    Fetches the authenticated user's GitHub username (login) using their access token.
-    Calls GET https://api.github.com/user.
+    Fetches the authenticated user's GitHub username (login) using their access token via PyGithub.
     """
     try:
-        headers = {
-            "Authorization": f"Bearer {access_token}",
-            "Accept": "application/vnd.github.v3+json",
-            "User-Agent": "Firebase-GitHub-Sync-App",
-        }
-        resp = requests.get(f"{GITHUB_API_BASE_URL}/user", headers=headers, timeout=10)
-        if resp.status_code == 200:
-            data = resp.json()
-            if isinstance(data, dict) and data.get("login"):
-                return str(data["login"])
-        logger.warning(f"Failed to fetch GitHub user login: HTTP {resp.status_code} - {resp.text}")
+        client = get_github_client(access_token)
+        user = client.get_user()
+        login = user.login
+        if login:
+            return str(login)
+        return None
+    except GithubException as e:
+        logger.warning(f"Failed to fetch GitHub user login: HTTP {e.status} - {e.data}")
         return None
     except Exception as e:
         logger.error(f"Exception fetching GitHub user login: {e}")
@@ -713,6 +957,7 @@ def start_user_github_sync(
             "filter": filter_name,
             "state": state,
             "per_page": 100,
+            "page": 0,
         }
         if since:
             params["since"] = since
@@ -737,6 +982,7 @@ def start_user_github_sync(
         repo_params: Dict[str, object] = {
             "state": state,
             "per_page": 100,
+            "page": 0,
         }
         if since:
             repo_params["since"] = since
@@ -784,25 +1030,27 @@ def get_user_stored_issues(
 
     results: List[Dict[str, object]] = []
     for doc_snap in docs:
-        data = doc_snap.to_dict() or {} if hasattr(doc_snap, "to_dict") else {}
+        data = doc_snap.to_dict() or {}
         for ts_key in ["synced_at", "created_at", "updated_at", "last_comment_update_time"]:
-            if ts_key in data and hasattr(data[ts_key], "isoformat"):
-                data[ts_key] = data[ts_key].isoformat()
+            ts_val = data.get(ts_key)
+            if isinstance(ts_val, datetime):
+                data[ts_key] = ts_val.isoformat()
         results.append(data)
 
     return results
 
 
 # ============================================================================
-# Scheduled Closed Issues Sync & Task Cleanup (Option A)
+# Scheduled Closed Issues Sync & Task Cleanup
 # ============================================================================
 
 def sync_closed_issues_for_user(
     user: User,
-    db: firestore.Client
+    db: firestore.Client,
+    client: Optional[Github] = None
 ) -> Dict[str, object]:
     """
-    Queries GitHub for issues closed since the last sync, updates their state in Firestore,
+    Queries GitHub for issues closed since the last sync via PyGithub, updates their state in Firestore,
     and deletes the corresponding Task document from users/{uid}/tasks.
     """
     user_uid = user.uid or "unknown"
@@ -815,6 +1063,7 @@ def sync_closed_issues_for_user(
         "X-GitHub-Api-Version": "2022-11-28",
     }
 
+    g = client or get_github_client(user.github_access_token)
     since = user.last_assigned_issue_update_time
     closed_items: List[Dict[str, object]] = []
 
@@ -825,12 +1074,13 @@ def sync_closed_issues_for_user(
             "filter": filter_name,
             "state": "closed",
             "per_page": 100,
+            "page": 0,
         }
         if since:
             params["since"] = since
 
         url = f"{GITHUB_API_BASE_URL}/issues"
-        items, _ = fetch_single_issue_page(url=url, headers=headers, params=params)
+        items, _ = fetch_single_issue_page(url=url, headers=headers, params=params, client=g)
         closed_items.extend(items)
 
     # 2. Query monitored repositories for closed issues
@@ -843,12 +1093,13 @@ def sync_closed_issues_for_user(
         repo_params: Dict[str, object] = {
             "state": "closed",
             "per_page": 100,
+            "page": 0,
         }
         if since:
             repo_params["since"] = since
 
         url = f"{GITHUB_API_BASE_URL}/repos/{owner_part}/{repo_part}/issues"
-        items, _ = fetch_single_issue_page(url=url, headers=headers, params=repo_params)
+        items, _ = fetch_single_issue_page(url=url, headers=headers, params=repo_params, client=g)
         for it in items:
             if "_owner_fallback" not in it:
                 it["_owner_fallback"] = owner_part
@@ -882,7 +1133,7 @@ def sync_closed_issues_for_user(
         # Update issue in Firestore to state="closed"
         issue_ref = issues_col.document(doc_id)
         doc_snap = issue_ref.get()
-        if getattr(doc_snap, "exists", False):
+        if doc_snap.exists:
             issue_ref.set({
                 "state": "closed",
                 "updated_at": firestore.SERVER_TIMESTAMP
@@ -892,7 +1143,7 @@ def sync_closed_issues_for_user(
         task_doc_id = f"task_{doc_id}"
         task_ref = tasks_col.document(task_doc_id)
         task_snap = task_ref.get()
-        if getattr(task_snap, "exists", False):
+        if task_snap.exists:
             task_ref.delete()
             closed_count += 1
             logger.info(f"Deleted task {task_doc_id} for UID {user_uid} because GitHub issue was closed.")
@@ -924,7 +1175,7 @@ def sync_all_users_closed_issues(db: firestore.Client) -> Dict[str, object]:
     users_processed = 0
 
     for doc_snap in users_docs:
-        raw_user_dict = doc_snap.to_dict() or {} if hasattr(doc_snap, "to_dict") else {}
+        raw_user_dict = doc_snap.to_dict() or {}
         user = User.model_validate({**raw_user_dict, "uid": doc_snap.id})
         if user.github_access_token:
             try:

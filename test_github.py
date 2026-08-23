@@ -1,6 +1,6 @@
 """
-Unit tests for functions/github.py
-Tests GitHub data structures, single-page issue & comment fetching, pagination chaining,
+Unit tests for functions/github_sync.py (PyGithub integration)
+Tests GitHub data structures, PyGithub adaptors, single-page issue & comment fetching, pagination chaining,
 Firestore persistence, and ensuring Tasks are ONLY created once an Issue and all comments are fully imported.
 """
 
@@ -13,11 +13,16 @@ from datetime import datetime, timezone
 # Add functions to path
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "functions"))
 
-from github import (
+from github_sync import (
     Issue,
     IssueType,
     AssociationReason,
     Comment,
+    get_github_client,
+    comment_from_pygithub,
+    issue_from_pygithub,
+    fetch_single_issue_page_pygithub,
+    fetch_single_comment_page_pygithub,
     fetch_single_issue_page,
     fetch_single_comment_page,
     process_and_save_issue_page,
@@ -26,7 +31,8 @@ from github import (
     enqueue_issue_page_sync,
     enqueue_comment_page_sync,
     get_user_stored_issues,
-    fetch_github_user_login
+    fetch_github_user_login,
+    sync_closed_issues_for_user
 )
 from user import User
 
@@ -86,36 +92,106 @@ class TestGitHubDataStructures(unittest.TestCase):
         self.assertEqual(dumped["issue_number"], 42)
 
 
+class TestPyGithubAdaptors(unittest.TestCase):
+
+    def test_comment_from_pygithub(self):
+        mock_pygh_comment = MagicMock()
+        mock_pygh_comment.id = 7788
+        mock_pygh_comment.user.login = "octo-reviewer"
+        mock_pygh_comment.body = "Approved!"
+        mock_pygh_comment.created_at = datetime(2026, 8, 22, 10, 0, tzinfo=timezone.utc)
+        mock_pygh_comment.updated_at = datetime(2026, 8, 22, 10, 5, tzinfo=timezone.utc)
+
+        comment = comment_from_pygithub(mock_pygh_comment)
+        self.assertEqual(comment.id, 7788)
+        self.assertEqual(comment.user_login, "octo-reviewer")
+        self.assertEqual(comment.body, "Approved!")
+        self.assertEqual(comment.created_at, datetime(2026, 8, 22, 10, 0, tzinfo=timezone.utc))
+
+    def test_issue_from_pygithub(self):
+        mock_pygh_issue = MagicMock()
+        mock_pygh_issue.number = 105
+        mock_pygh_issue.title = "Add PyGithub integration"
+        mock_pygh_issue.body = "Refactor GitHub layer to use PyGithub."
+        mock_pygh_issue.state = "open"
+        mock_pygh_issue.html_url = "https://github.com/brianquinlan/marathon2/issues/105"
+        mock_pygh_issue.pull_request = None
+        mock_pygh_issue.user.login = "brianquinlan"
+        mock_assignee = MagicMock()
+        mock_assignee.login = "brianquinlan"
+        mock_pygh_issue.assignees = [mock_assignee]
+        mock_pygh_issue.repository.owner.login = "brianquinlan"
+        mock_pygh_issue.repository.name = "marathon2"
+        mock_pygh_issue.created_at = datetime(2026, 8, 22, 8, 0, tzinfo=timezone.utc)
+        mock_pygh_issue.updated_at = datetime(2026, 8, 22, 8, 30, tzinfo=timezone.utc)
+        mock_pygh_issue.comments_url = "https://api.github.com/repos/brianquinlan/marathon2/issues/105/comments"
+
+        issue = issue_from_pygithub(mock_pygh_issue, reason=AssociationReason.ASSIGNED)
+        self.assertEqual(issue.doc_id, "brianquinlan_marathon2_105")
+        self.assertEqual(issue.issue_type, IssueType.ISSUE)
+        self.assertEqual(issue.owner, "brianquinlan")
+        self.assertEqual(issue.repo, "marathon2")
+        self.assertEqual(issue.title, "Add PyGithub integration")
+        self.assertEqual(issue.assignee_logins, ["brianquinlan"])
+
+
 class TestSinglePageFetchingAndPagination(unittest.TestCase):
 
-    @patch("requests.get")
-    def test_fetch_single_issue_page_with_next_link(self, mock_get):
-        mock_resp = MagicMock()
-        mock_resp.status_code = 200
-        mock_resp.json.return_value = [
-            {"number": 1, "title": "Issue 1", "repository": {"owner": {"login": "org"}, "name": "repo"}}
-        ]
-        mock_resp.links = {"next": {"url": "https://api.github.com/issues?page=2"}}
-        mock_get.return_value = mock_resp
+    @patch("github_sync.fetch_single_issue_page_pygithub")
+    @patch("github_sync.get_github_client")
+    def test_fetch_single_issue_page_with_next_link(self, mock_get_client, mock_fetch_pygh):
+        mock_client = MagicMock()
+        mock_get_client.return_value = mock_client
 
-        items, next_url = fetch_single_issue_page("https://api.github.com/issues", headers={"Authorization": "Bearer test"})
+        mock_issue = MagicMock()
+        mock_issue.number = 1
+        mock_issue.title = "Issue 1"
+        mock_issue.body = "Body 1"
+        mock_issue.state = "open"
+        mock_issue.html_url = "https://github.com/org/repo/issues/1"
+        mock_issue.comments = 2
+        mock_issue.comments_url = "https://api.github.com/repos/org/repo/issues/1/comments"
+        mock_issue.created_at = datetime(2026, 8, 22, 10, 0, tzinfo=timezone.utc)
+        mock_issue.updated_at = datetime(2026, 8, 22, 10, 0, tzinfo=timezone.utc)
+        mock_issue.user.login = "author1"
+        mock_issue.assignees = []
+        mock_issue.pull_request = None
+        mock_issue.repository.owner.login = "org"
+        mock_issue.repository.name = "repo"
+
+        mock_fetch_pygh.return_value = ([mock_issue], True)
+
+        items, next_url = fetch_single_issue_page(
+            "https://api.github.com/issues",
+            headers={"Authorization": "Bearer test"},
+            params={"page": 0, "per_page": 100}
+        )
         self.assertEqual(len(items), 1)
-        self.assertEqual(next_url, "https://api.github.com/issues?page=2")
+        self.assertEqual(items[0]["number"], 1)
+        self.assertEqual(next_url, "https://api.github.com/issues?page=1")
 
-    @patch("requests.get")
-    def test_fetch_single_comment_page_with_next_link(self, mock_get):
-        mock_resp = MagicMock()
-        mock_resp.status_code = 200
-        mock_resp.json.return_value = [
-            {"id": 501, "user": {"login": "reviewer"}, "body": "Looks good"}
-        ]
-        mock_resp.links = {"next": {"url": "https://api.github.com/comments?page=2"}}
-        mock_get.return_value = mock_resp
+    @patch("github_sync.fetch_single_comment_page_pygithub")
+    @patch("github_sync.get_github_client")
+    def test_fetch_single_comment_page_with_next_link(self, mock_get_client, mock_fetch_pygh):
+        mock_client = MagicMock()
+        mock_get_client.return_value = mock_client
 
-        comments, next_url = fetch_single_comment_page("https://api.github.com/comments", headers={"Authorization": "Bearer test"})
+        mock_comment = Comment(
+            id=501,
+            user_login="reviewer",
+            body="Looks good",
+            created_at=datetime(2026, 8, 22, 10, 0, tzinfo=timezone.utc)
+        )
+        mock_fetch_pygh.return_value = ([mock_comment], True)
+
+        comments, next_url = fetch_single_comment_page(
+            "https://api.github.com/repos/org/repo/issues/10/comments",
+            headers={"Authorization": "Bearer test"},
+            params={"page": 0, "per_page": 100}
+        )
         self.assertEqual(len(comments), 1)
         self.assertEqual(comments[0].id, 501)
-        self.assertEqual(next_url, "https://api.github.com/comments?page=2")
+        self.assertEqual(next_url, "https://api.github.com/repos/org/repo/issues/10/comments?page=1")
 
 
 class TestPageProcessingAndTaskCreationTiming(unittest.TestCase):
@@ -145,7 +221,7 @@ class TestPageProcessingAndTaskCreationTiming(unittest.TestCase):
             }
         ]
 
-        with patch("github.ensure_task_for_issue") as mock_ensure_task:
+        with patch("github_sync.ensure_task_for_issue") as mock_ensure_task:
             saved_ids = process_and_save_issue_page(
                 uid="user_123",
                 raw_items=raw_items,
@@ -182,7 +258,7 @@ class TestPageProcessingAndTaskCreationTiming(unittest.TestCase):
             }
         ]
 
-        with patch("github.ensure_task_for_issue") as mock_ensure_task:
+        with patch("github_sync.ensure_task_for_issue") as mock_ensure_task:
             saved_ids = process_and_save_issue_page(
                 uid="user_123",
                 raw_items=raw_items,
@@ -216,7 +292,7 @@ class TestPageProcessingAndTaskCreationTiming(unittest.TestCase):
             Comment(id=2, user_login="u2", body="c2", created_at=datetime(2026, 8, 22, 10, 0, tzinfo=timezone.utc))
         ]
 
-        with patch("github.ensure_task_for_issue") as mock_ensure_task:
+        with patch("github_sync.ensure_task_for_issue") as mock_ensure_task:
             # Intermediate comment page (is_last_page=False)
             saved_count = process_and_save_comment_page(
                 uid="user_123",
@@ -242,7 +318,7 @@ class TestPageProcessingAndTaskCreationTiming(unittest.TestCase):
 
 class TestInitialSyncDispatcher(unittest.TestCase):
 
-    @patch("github.enqueue_issue_page_sync")
+    @patch("github_sync.enqueue_issue_page_sync")
     def test_start_user_github_sync(self, mock_enqueue):
         mock_db = MagicMock()
         mock_user_doc = MagicMock()
@@ -263,28 +339,28 @@ class TestInitialSyncDispatcher(unittest.TestCase):
 
 class TestGitHubUserLoginDiscovery(unittest.TestCase):
 
-    @patch("requests.get")
-    def test_fetch_github_user_login_success(self, mock_get):
-        mock_resp = MagicMock()
-        mock_resp.status_code = 200
-        mock_resp.json.return_value = {"login": "brianquinlan", "id": 12345}
-        mock_get.return_value = mock_resp
+    @patch("github_sync.get_github_client")
+    def test_fetch_github_user_login_success(self, mock_get_client):
+        mock_client = MagicMock()
+        mock_user = MagicMock()
+        mock_user.login = "brianquinlan"
+        mock_client.get_user.return_value = mock_user
+        mock_get_client.return_value = mock_client
 
         login = fetch_github_user_login("gho_valid_token")
         self.assertEqual(login, "brianquinlan")
 
-    @patch("requests.get")
-    def test_fetch_github_user_login_error_returns_none(self, mock_get):
-        mock_resp = MagicMock()
-        mock_resp.status_code = 401
-        mock_resp.text = "Bad credentials"
-        mock_get.return_value = mock_resp
+    @patch("github_sync.get_github_client")
+    def test_fetch_github_user_login_error_returns_none(self, mock_get_client):
+        mock_client = MagicMock()
+        mock_client.get_user.side_effect = Exception("Invalid token")
+        mock_get_client.return_value = mock_client
 
         login = fetch_github_user_login("gho_bad_token")
         self.assertIsNone(login)
 
-    @patch("github.fetch_github_user_login")
-    @patch("github.enqueue_issue_page_sync")
+    @patch("github_sync.fetch_github_user_login")
+    @patch("github_sync.enqueue_issue_page_sync")
     def test_start_user_github_sync_discovers_username(self, mock_enqueue, mock_fetch_login):
         mock_db = MagicMock()
         mock_user_doc = MagicMock()
@@ -311,7 +387,7 @@ class TestGitHubUserLoginDiscovery(unittest.TestCase):
 
 class TestClosedIssuesSync(unittest.TestCase):
 
-    @patch("github.fetch_single_issue_page")
+    @patch("github_sync.fetch_single_issue_page")
     def test_sync_closed_issues_for_user_deletes_tasks_and_updates_issue(self, mock_fetch):
         mock_db = MagicMock()
         mock_user_doc = MagicMock()
@@ -351,7 +427,6 @@ class TestClosedIssuesSync(unittest.TestCase):
             monitored_repos=["brianquinlan/marathon2"]
         )
 
-        from github import sync_closed_issues_for_user
         res = sync_closed_issues_for_user(user=user, db=mock_db)
 
         self.assertEqual(res["status"], "success")

@@ -112,7 +112,7 @@ def run_ranker(
 
     comments_formatted = "\n\n".join(comments_text_list) if comments_text_list else "No comments on this issue."
 
-    issue_title = issue_data.get("title") or getattr(task, "github_issue_title", None) or "Untitled Issue"
+    issue_title = issue_data.get("title") or task.github_issue_title or "Untitled Issue"
     issue_body = issue_data.get("body") or "No issue description provided."
     issue_state = issue_data.get("state") or "open"
     issue_author = issue_data.get("user") or "unknown"
@@ -156,14 +156,14 @@ Please evaluate the priority for the user {user_info_str} and assign a priority 
 """.strip()
 
     try:
-        active_agent = agent or (ai if hasattr(ai, "run_sync") else None) or get_pydantic_ai_agent(api_key=gemini_api_key, system_prompt=system_instruction)
+        active_agent = agent or get_pydantic_ai_agent(api_key=gemini_api_key, system_prompt=system_instruction)
         logger.info(f"[RANKER] Executing synchronous run_sync with Pydantic AI for task {task.doc_id}...")
 
-        result = getattr(active_agent, "run_sync")(user_prompt=prompt_text)
-        logger.info(f"[RANKER] Pydantic AI call succeeded for {task.doc_id}. Output: {getattr(result, 'output', getattr(result, 'data', None))}")
+        result = active_agent.run_sync(user_prompt=prompt_text)
+        logger.info(f"[RANKER] Pydantic AI call succeeded for {task.doc_id}. Output: {result.output}")
 
         computed_priority = 0.5
-        output_obj = getattr(result, "output", getattr(result, "data", None))
+        output_obj = result.output
         if output_obj is not None:
             if isinstance(output_obj, TaskPriorityOutput):
                 computed_priority = output_obj.priority
@@ -171,9 +171,6 @@ Please evaluate the priority for the user {user_info_str} and assign a priority 
             elif isinstance(output_obj, dict):
                 computed_priority = float(output_obj.get("priority", 0.5))
                 logger.info(f"[RANKER] Parsed dict output: priority={computed_priority}")
-            elif hasattr(output_obj, "priority"):
-                computed_priority = float(output_obj.priority)
-                logger.info(f"[RANKER] Parsed object output: priority={computed_priority}")
 
         computed_priority = max(0.0, min(1.0, float(computed_priority)))
         task.priority = computed_priority

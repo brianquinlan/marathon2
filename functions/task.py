@@ -42,8 +42,11 @@ class Task(BaseModel):
             return None
         if isinstance(v, str):
             return v
-        if hasattr(v, "path"):
-            return str(getattr(v, "path"))
+        if isinstance(v, firestore.DocumentReference):
+            return str(v.path)
+        ref_path = getattr(v, "path", None)
+        if isinstance(ref_path, str):
+            return ref_path
         return str(v)
 
     @field_serializer("created_at", "updated_at", when_used="json")
@@ -147,8 +150,8 @@ def ensure_task_for_issue(
     raw_url = issue_data.get("url")
     issue_url = str(raw_url) if raw_url is not None else None
 
-    if getattr(doc_snap, "exists", False):
-        raw_dict = doc_snap.to_dict() or {} if hasattr(doc_snap, "to_dict") else {}
+    if doc_snap.exists:
+        raw_dict = doc_snap.to_dict() or {}
         task = Task.model_validate({**raw_dict, "id": task_doc_id})
         task.priority_needs_updated = True
         task.github_issue_title = issue_title or task.github_issue_title
@@ -184,11 +187,11 @@ def update_task_priority(uid: str, task_id: str, db: firestore.Client) -> Dict[s
     logger.info(f"[UPDATE_TASK_PRIORITY] Starting update_task_priority: uid={uid}, task_id={task_id}")
     task_ref = db.collection("users").document(uid).collection("tasks").document(task_id)
     doc_snap = task_ref.get()
-    if not getattr(doc_snap, "exists", False):
+    if not doc_snap.exists:
         logger.warning(f"[UPDATE_TASK_PRIORITY] Task document {task_id} NOT found for UID {uid}.")
         return {"status": "not_found", "task_id": task_id, "uid": uid}
 
-    raw_task_data = doc_snap.to_dict() or {} if hasattr(doc_snap, "to_dict") else {}
+    raw_task_data = doc_snap.to_dict() or {}
     task = Task.model_validate({**raw_task_data, "id": task_id})
     logger.info(
         f"[UPDATE_TASK_PRIORITY] Loaded task {task_id}: title='{task.github_issue_title}', "
@@ -202,8 +205,8 @@ def update_task_priority(uid: str, task_id: str, db: firestore.Client) -> Dict[s
     if issue_id:
         issue_ref = db.collection("users").document(uid).collection("issues").document(issue_id)
         issue_snap = issue_ref.get()
-        if getattr(issue_snap, "exists", False):
-            issue_data = issue_snap.to_dict() or {} if hasattr(issue_snap, "to_dict") else {}
+        if issue_snap.exists:
+            issue_data = issue_snap.to_dict() or {}
             raw_comments = issue_data.get("comments", [])
             comments_len = len(raw_comments) if isinstance(raw_comments, list) else 0
             logger.info(f"[UPDATE_TASK_PRIORITY] Found issue doc {issue_id} with {comments_len} comments.")
@@ -215,8 +218,8 @@ def update_task_priority(uid: str, task_id: str, db: firestore.Client) -> Dict[s
     user_snap = user_ref.get()
     github_username: Optional[str] = None
     gemini_api_key: Optional[str] = None
-    if getattr(user_snap, "exists", False):
-        u_dict = user_snap.to_dict() or {} if hasattr(user_snap, "to_dict") else {}
+    if user_snap.exists:
+        u_dict = user_snap.to_dict() or {}
         raw_u_name = u_dict.get("github_username")
         github_username = str(raw_u_name) if raw_u_name is not None else None
         raw_key = u_dict.get("gemini_api_key")
@@ -292,7 +295,7 @@ def get_user_tasks(uid: str, db: firestore.Client, limit: int = 100) -> List[Dic
 
     tasks: List[Dict[str, object]] = []
     for doc_snap in docs:
-        raw_dict = doc_snap.to_dict() or {} if hasattr(doc_snap, "to_dict") else {}
+        raw_dict = doc_snap.to_dict() or {}
         t = Task.model_validate({**raw_dict, "id": doc_snap.id})
         tasks.append(t.model_dump(mode="json"))
 

@@ -12,7 +12,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "functions"))
 from auth_utils import extract_provider_info, verify_bearer_token, fetch_full_user_auth_record
 from user import User
 from task import Task
-from github import Issue, IssueType, Comment
+from github_sync import Issue, IssueType, Comment
 from firebase_functions import https_fn, tasks_fn
 import main
 
@@ -197,10 +197,10 @@ class TestCallableFunctionLogic(unittest.TestCase):
 
 class TestTaskQueueSyncHandlers(unittest.TestCase):
 
-    @patch("github.enqueue_issue_page_sync")
-    @patch("github.enqueue_comment_page_sync")
-    @patch("github.process_and_save_issue_page")
-    @patch("github.fetch_single_issue_page")
+    @patch("github_sync.enqueue_issue_page_sync")
+    @patch("github_sync.enqueue_comment_page_sync")
+    @patch("github_sync.process_and_save_issue_page")
+    @patch("github_sync.fetch_single_issue_page")
     @patch("main.db")
     def test_sync_github_issues_page_handler(
         self, mock_db, mock_fetch_page, mock_save_page, mock_enqueue_comment, mock_enqueue_issue
@@ -238,9 +238,9 @@ class TestTaskQueueSyncHandlers(unittest.TestCase):
         mock_enqueue_comment.assert_called_once()
         mock_enqueue_issue.assert_called_once()
 
-    @patch("github.enqueue_comment_page_sync")
-    @patch("github.process_and_save_comment_page")
-    @patch("github.fetch_single_comment_page")
+    @patch("github_sync.enqueue_comment_page_sync")
+    @patch("github_sync.process_and_save_comment_page")
+    @patch("github_sync.fetch_single_comment_page")
     @patch("main.db")
     def test_sync_issue_comments_page_handler(
         self, mock_db, mock_fetch_comments, mock_save_comments, mock_enqueue_next_comments

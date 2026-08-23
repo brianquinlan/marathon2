@@ -24,7 +24,7 @@ from flask import Response
 
 from auth_utils import extract_provider_info, fetch_full_user_auth_record, verify_bearer_token
 from user import User
-from github import (
+from github_sync import (
     start_user_github_sync,
     fetch_single_issue_page,
     process_and_save_issue_page,
@@ -107,7 +107,7 @@ def render_main_page(req: https_fn.Request) -> Response:
     uid = str(decoded_token.get("uid") or "")
     # Fetch user details
     user_doc = db.collection("users").document(uid).get()
-    user_data = user_doc.to_dict() if getattr(user_doc, "exists", False) else {}
+    user_data = user_doc.to_dict() if user_doc.exists else {}
     if not user_data:
         user_data = {
             "uid": uid,
@@ -120,7 +120,7 @@ def render_main_page(req: https_fn.Request) -> Response:
     tasks_docs = tasks_col.stream()
     tasks_list: List[Dict[str, object]] = []
     for doc in tasks_docs:
-        t_data = doc.to_dict() or {} if hasattr(doc, "to_dict") else {}
+        t_data = doc.to_dict() or {}
         tasks_list.append(t_data)
 
     # Sort descending from highest to lowest priority
@@ -194,7 +194,7 @@ def render_settings_page(req: https_fn.Request) -> Response:
         user_ref.set(update_data, merge=True)
 
         doc_snap = user_ref.get()
-        user_data = doc_snap.to_dict() if getattr(doc_snap, "exists", False) else {"uid": uid}
+        user_data = doc_snap.to_dict() if doc_snap.exists else {"uid": uid}
 
         html = template.render(
             user=user_data,
@@ -204,7 +204,7 @@ def render_settings_page(req: https_fn.Request) -> Response:
 
     # GET request: render form with current values
     doc_snap = user_ref.get()
-    user_data = doc_snap.to_dict() if getattr(doc_snap, "exists", False) else {
+    user_data = doc_snap.to_dict() if doc_snap.exists else {
         "uid": uid,
         "email": decoded_token.get("email"),
         "display_name": decoded_token.get("name")
@@ -263,8 +263,8 @@ def associate_user_info(req: https_fn.CallableRequest) -> Dict[str, object]:
     user_ref = db.collection("users").document(uid)
     doc_snap = user_ref.get()
 
-    if getattr(doc_snap, "exists", False):
-        raw_user_dict = doc_snap.to_dict() or {} if hasattr(doc_snap, "to_dict") else {}
+    if doc_snap.exists:
+        raw_user_dict = doc_snap.to_dict() or {}
         user = User.model_validate({**raw_user_dict, "uid": uid})
 
         # Update fields if provided
@@ -350,14 +350,14 @@ def get_user_info(req: https_fn.CallableRequest) -> Dict[str, object]:
     user_ref = db.collection("users").document(uid)
     doc_snap = user_ref.get()
 
-    if not getattr(doc_snap, "exists", False):
+    if not doc_snap.exists:
         user = User.from_auth_token(
             token_dict=token,
             provider_info=provider_info,
         )
         user_ref.set({**user.model_dump(), "updated_at": SERVER_TIMESTAMP})
     else:
-        raw_user_dict = doc_snap.to_dict() or {} if hasattr(doc_snap, "to_dict") else {}
+        raw_user_dict = doc_snap.to_dict() or {}
         user = User.model_validate({**raw_user_dict, "uid": uid})
 
     return {
@@ -387,8 +387,8 @@ def sync_auth_profile(req: https_fn.CallableRequest) -> Dict[str, object]:
     user_ref = db.collection("users").document(uid)
     doc_snap = user_ref.get()
 
-    if getattr(doc_snap, "exists", False):
-        raw_user_dict = doc_snap.to_dict() or {} if hasattr(doc_snap, "to_dict") else {}
+    if doc_snap.exists:
+        raw_user_dict = doc_snap.to_dict() or {}
         user = User.model_validate({**raw_user_dict, "uid": uid})
     else:
         user = User(uid=uid)
@@ -431,7 +431,7 @@ def delete_user_info(req: https_fn.CallableRequest) -> Dict[str, object]:
     user_ref = db.collection("users").document(uid)
     doc_snap = user_ref.get()
 
-    if getattr(doc_snap, "exists", False):
+    if doc_snap.exists:
         user_ref.delete()
         logger.info(f"Deleted User document for UID {uid}")
         return {"status": "success", "message": f"User document for UID {uid} has been deleted."}
@@ -461,13 +461,13 @@ def sync_github_issues(req: https_fn.CallableRequest) -> Dict[str, object]:
     user_ref = db.collection("users").document(uid)
     doc_snap = user_ref.get()
 
-    if not getattr(doc_snap, "exists", False):
+    if not doc_snap.exists:
         raise https_fn.HttpsError(
             code=https_fn.FunctionsErrorCode.NOT_FOUND,
             message="User document not found in Firestore. Please configure your GitHub access token first."
         )
 
-    raw_user_dict = doc_snap.to_dict() or {} if hasattr(doc_snap, "to_dict") else {}
+    raw_user_dict = doc_snap.to_dict() or {}
     user = User.model_validate({**raw_user_dict, "uid": uid})
 
     if not user.github_access_token:
@@ -558,7 +558,7 @@ def sync_github_issues_page(req: tasks_fn.CallableRequest) -> Dict[str, object]:
             message="Missing 'uid' or 'url' in task data."
         )
 
-    from github import execute_issue_page_sync
+    from github_sync import execute_issue_page_sync
     return execute_issue_page_sync(
         uid=uid,
         url=url,
@@ -603,7 +603,7 @@ def sync_issue_comments_page(req: tasks_fn.CallableRequest) -> Dict[str, object]
             message="Missing required parameters for comment sync."
         )
 
-    from github import execute_comment_page_sync
+    from github_sync import execute_comment_page_sync
     return execute_comment_page_sync(
         uid=uid,
         issue_doc_id=issue_doc_id,
@@ -740,8 +740,8 @@ def user_api(req: https_fn.Request) -> Response:
 
     if req.method == "GET":
         doc_snap = user_ref.get()
-        if getattr(doc_snap, "exists", False):
-            raw_user_dict = doc_snap.to_dict() or {} if hasattr(doc_snap, "to_dict") else {}
+        if doc_snap.exists:
+            raw_user_dict = doc_snap.to_dict() or {}
             user = User.model_validate({**raw_user_dict, "uid": uid})
         else:
             user = User.from_auth_token(decoded_token, provider_info)
@@ -764,8 +764,8 @@ def user_api(req: https_fn.Request) -> Response:
             body = {}
 
         doc_snap = user_ref.get()
-        if getattr(doc_snap, "exists", False):
-            raw_user_dict = doc_snap.to_dict() or {} if hasattr(doc_snap, "to_dict") else {}
+        if doc_snap.exists:
+            raw_user_dict = doc_snap.to_dict() or {}
             user = User.model_validate({**raw_user_dict, "uid": uid})
         else:
             user = User.from_auth_token(decoded_token, provider_info)
@@ -854,15 +854,15 @@ def on_user_settings_changed(
     before_snap = event.data.before
 
     # If document does not exist after write, do nothing
-    if hasattr(after_snap, "exists") and not after_snap.exists:
+    if not after_snap.exists:
         logger.info("User document does not exist after write; skipping.")
         return
 
-    after_data = after_snap.to_dict() or {} if hasattr(after_snap, "to_dict") else {}
+    after_data = after_snap.to_dict() or {}
     before_data = {}
-    is_new = (before_snap is None) or (hasattr(before_snap, "exists") and not before_snap.exists)
+    is_new = (before_snap is None) or not before_snap.exists
     if not is_new and before_snap is not None:
-        before_data = before_snap.to_dict() or {} if hasattr(before_snap, "to_dict") else {}
+        before_data = before_snap.to_dict() or {}
 
     after_token = after_data.get("github_access_token")
     before_token = before_data.get("github_access_token")
@@ -913,18 +913,18 @@ def on_task_written(
     before_snap = event.data.before
 
     # If document does not exist after write, do nothing
-    if hasattr(after_snap, "exists") and not after_snap.exists:
+    if not after_snap.exists:
         logger.info(f"[TRIGGER:on_task_written] Task document does not exist after write for users/{uid}/tasks/{task_id}; skipping.")
         return
 
-    after_data = after_snap.to_dict() or {} if hasattr(after_snap, "to_dict") else {}
+    after_data = after_snap.to_dict() or {}
     after_needs_update = after_data.get("priority_needs_updated", False)
     after_priority = after_data.get("priority", 0.0)
 
-    is_new = (before_snap is None) or (hasattr(before_snap, "exists") and not before_snap.exists)
+    is_new = (before_snap is None) or not before_snap.exists
     before_data = {}
     if not is_new and before_snap is not None:
-        before_data = before_snap.to_dict() or {} if hasattr(before_snap, "to_dict") else {}
+        before_data = before_snap.to_dict() or {}
     before_needs_update = before_data.get("priority_needs_updated", False)
     before_priority = before_data.get("priority", 0.0)
 
