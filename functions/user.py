@@ -8,6 +8,8 @@ class User(BaseModel):
 
     # User-specific application data
     github_access_token: Optional[str] = None
+    github_username: Optional[str] = None
+    gemini_api_key: Optional[str] = None
     last_assigned_issue_update_time: Optional[str] = None
     monitored_repos: List[str] = Field(default_factory=list)
 

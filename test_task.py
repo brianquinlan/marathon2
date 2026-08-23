@@ -15,6 +15,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "functions"))
 
 from task import (
     Task,
+    TaskPriorityOutput,
     run_ranker,
     ensure_task_for_issue,
     update_task_priority,
@@ -96,9 +97,76 @@ class TestTaskModel(unittest.TestCase):
 
 class TestRankerEngine(unittest.TestCase):
 
-    def test_run_ranker_resets_priority_needs_updated(self):
-        t1 = Task(id="t1", priority=0.0, priority_needs_updated=True)
-        ranked = run_ranker(t1)
+    def test_run_ranker_with_genkit_model(self):
+        mock_ai = MagicMock()
+        mock_output = TaskPriorityOutput(
+            priority=0.92,
+            reasoning="Current user @brian is explicitly mentioned in comments asking for a blocker fix."
+        )
+        mock_res = MagicMock()
+        mock_res.output = mock_output
+
+        async def fake_generate(**kwargs):
+            self.assertEqual(kwargs.get("model"), "googleai/gemini-flash-latest")
+            self.assertEqual(kwargs.get("output_schema"), TaskPriorityOutput)
+            self.assertIn("@brian", kwargs.get("prompt", ""))
+            self.assertIn("Critical Blocker", kwargs.get("prompt", ""))
+            self.assertIn("Hey @brian please check this ASAP", kwargs.get("prompt", ""))
+            return mock_res
+
+        mock_ai.generate.side_effect = fake_generate
+
+        task = Task(
+            id="task_1",
+            priority=0.0,
+            priority_needs_updated=True,
+            github_issue_title="Critical Blocker"
+        )
+        issue_data = {
+            "title": "Critical Blocker",
+            "body": "System down due to null pointer.",
+            "user": "alice",
+            "comments": [
+                {
+                    "user_login": "charlie",
+                    "body": "Hey @brian please check this ASAP",
+                    "created_at": "2026-08-22T12:00:00Z"
+                }
+            ]
+        }
+
+        ranked = run_ranker(
+            task=task,
+            issue=issue_data,
+            github_username="brian",
+            gemini_api_key="AIzaSyRankerKey",
+            ai=mock_ai
+        )
+        self.assertEqual(ranked.priority, 0.92)
+        self.assertFalse(ranked.priority_needs_updated)
+
+    @patch("genkit_google_genai.GoogleAI")
+    @patch("genkit.Genkit")
+    def test_get_genkit_ai_uses_gemini_api_key(self, mock_genkit_cls, mock_google_ai_cls):
+        from task import get_genkit_ai
+        mock_genkit_instance = MagicMock()
+        mock_genkit_cls.return_value = mock_genkit_instance
+
+        client = get_genkit_ai(api_key="custom_key_12345")
+        mock_google_ai_cls.assert_called_with(api_key="custom_key_12345")
+        self.assertEqual(client, mock_genkit_instance)
+
+    def test_run_ranker_fallback_on_error(self):
+        mock_ai = MagicMock()
+        async def fake_generate_error(**kwargs):
+            raise RuntimeError("API quota exceeded or network error")
+
+        mock_ai.generate.side_effect = fake_generate_error
+
+        task = Task(id="task_err", priority=0.65, priority_needs_updated=True)
+        ranked = run_ranker(task=task, gemini_api_key="bad_key", ai=mock_ai)
+        # Priority should be preserved and priority_needs_updated reset to False
+        self.assertEqual(ranked.priority, 0.65)
         self.assertFalse(ranked.priority_needs_updated)
 
 
@@ -153,29 +221,72 @@ class TestTaskFirestoreOperations(unittest.TestCase):
         self.assertEqual(updated_task.priority, 0.7)
         mock_task_ref.set.assert_called_once()
 
-    def test_update_task_priority(self):
+    @patch("task.run_ranker")
+    def test_update_task_priority(self, mock_run_ranker):
         mock_db = MagicMock()
         mock_user_doc = MagicMock()
         mock_tasks_col = MagicMock()
+        mock_issues_col = MagicMock()
         mock_task_ref = MagicMock()
-        mock_doc_snap = MagicMock()
+        mock_issue_ref = MagicMock()
 
-        mock_db.collection.return_value.document.return_value = mock_user_doc
-        mock_user_doc.collection.return_value = mock_tasks_col
-        mock_tasks_col.document.return_value = mock_task_ref
-        mock_task_ref.get.return_value = mock_doc_snap
-
-        mock_doc_snap.exists = True
-        mock_doc_snap.to_dict.return_value = {
-            "id": "task_1",
+        mock_task_snap = MagicMock()
+        mock_task_snap.exists = True
+        mock_task_snap.to_dict.return_value = {
+            "id": "task_issue_10",
+            "github_issue_id": "org_repo_10",
             "priority": 0.0,
             "priority_needs_updated": True,
             "github_issue_title": "Needs rank"
         }
+        mock_task_ref.get.return_value = mock_task_snap
 
-        result = update_task_priority("user_100", "task_1", mock_db)
+        mock_issue_snap = MagicMock()
+        mock_issue_snap.exists = True
+        mock_issue_snap.to_dict.return_value = {
+            "title": "Issue 10",
+            "body": "Description",
+            "comments": [{"user_login": "bob", "body": "Comment text"}]
+        }
+        mock_issue_ref.get.return_value = mock_issue_snap
+
+        mock_user_snap = MagicMock()
+        mock_user_snap.exists = True
+        mock_user_snap.to_dict.return_value = {
+            "github_username": "brian_dev",
+            "gemini_api_key": "AIzaSyUserDocKey"
+        }
+        mock_user_doc.get.return_value = mock_user_snap
+
+        def col_side_effect(name):
+            if name == "tasks":
+                return mock_tasks_col
+            elif name == "issues":
+                return mock_issues_col
+            return MagicMock()
+
+        mock_user_doc.collection.side_effect = col_side_effect
+        mock_tasks_col.document.return_value = mock_task_ref
+        mock_issues_col.document.return_value = mock_issue_ref
+        mock_db.collection.return_value.document.return_value = mock_user_doc
+
+        ranked_mock_task = Task(
+            id="task_issue_10",
+            github_issue_id="org_repo_10",
+            priority=0.88,
+            priority_needs_updated=False
+        )
+        mock_run_ranker.return_value = ranked_mock_task
+
+        result = update_task_priority("user_100", "task_issue_10", mock_db)
         self.assertEqual(result["status"], "success")
-        self.assertEqual(result["task_id"], "task_1")
+        self.assertEqual(result["task_id"], "task_issue_10")
+        self.assertEqual(result["priority"], 0.88)
+        mock_run_ranker.assert_called_once()
+        args, kwargs = mock_run_ranker.call_args
+        self.assertEqual(kwargs.get("github_username"), "brian_dev")
+        self.assertEqual(kwargs.get("gemini_api_key"), "AIzaSyUserDocKey")
+        self.assertEqual(kwargs.get("issue"), mock_issue_snap.to_dict.return_value)
         mock_task_ref.set.assert_called_once()
 
     def test_force_rerank_tasks_marks(self):

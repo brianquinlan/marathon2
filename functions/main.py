@@ -178,11 +178,13 @@ def render_settings_page(req: https_fn.Request) -> https_fn.Response:
 
     if req.method == "POST":
         new_token = (req.form.get("github_access_token") or "").strip()
+        new_gemini_key = (req.form.get("gemini_api_key") or "").strip()
         raw_repos = (req.form.get("monitored_repos") or "").strip()
         repo_list = [r.strip() for r in raw_repos.split(",") if r.strip()]
 
         update_data: Dict[str, Any] = {
             "github_access_token": new_token if new_token else None,
+            "gemini_api_key": new_gemini_key if new_gemini_key else None,
             "monitored_repos": repo_list,
             "updated_at": firestore.SERVER_TIMESTAMP,
         }
@@ -225,6 +227,7 @@ def associate_user_info(req: https_fn.CallableRequest) -> Dict[str, Any]:
     Associates custom information with the authenticated user in Firestore using the User model.
     Accepts:
       - github_access_token (optional)
+      - gemini_api_key (optional)
       - last_assigned_issue_update_time (optional)
       - monitored_repos (optional list of repository names, e.g. ["owner/repo"])
       - custom_data or associated_data (optional dictionary of arbitrary user properties)
@@ -244,6 +247,7 @@ def associate_user_info(req: https_fn.CallableRequest) -> Dict[str, Any]:
 
     # Extract user-specific fields
     github_access_token = payload.get("github_access_token")
+    gemini_api_key = payload.get("gemini_api_key")
     last_assigned_issue_update_time = payload.get("last_assigned_issue_update_time")
     monitored_repos = payload.get("monitored_repos")
     custom_data = payload.get("custom_data") or payload.get("associated_data") or {}
@@ -258,6 +262,8 @@ def associate_user_info(req: https_fn.CallableRequest) -> Dict[str, Any]:
         # Update fields if provided
         if github_access_token is not None:
             user.github_access_token = github_access_token
+        if gemini_api_key is not None:
+            user.gemini_api_key = gemini_api_key
         if last_assigned_issue_update_time is not None:
             user.last_assigned_issue_update_time = last_assigned_issue_update_time
         if monitored_repos is not None:

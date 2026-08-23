@@ -599,6 +599,28 @@ def enqueue_comment_page_sync(
         return "fallback_dispatched"
 
 
+def fetch_github_user_login(access_token: str) -> Optional[str]:
+    """
+    Fetches the authenticated user's GitHub username (login) from the GitHub API (/user).
+    """
+    try:
+        headers = {
+            "Authorization": f"Bearer {access_token}",
+            "Accept": "application/vnd.github+json",
+            "X-GitHub-Api-Version": "2022-11-28",
+        }
+        resp = requests.get(f"{GITHUB_API_BASE_URL}/user", headers=headers, timeout=10)
+        if resp.status_code == 200:
+            data = resp.json()
+            return data.get("login")
+        else:
+            logger.warning(f"Failed to fetch GitHub user login: HTTP {resp.status_code} - {resp.text}")
+            return None
+    except Exception as e:
+        logger.error(f"Exception fetching GitHub user login: {e}")
+        return None
+
+
 # ============================================================================
 # Initial Sync Dispatcher
 # ============================================================================
@@ -617,6 +639,17 @@ def start_user_github_sync(
     """
     if not user.github_access_token:
         raise ValueError(f"User {user.uid or user.display_name or 'unknown'} does not have a github_access_token configured.")
+
+    # Discover and store github_username if not already populated
+    if not user.github_username and user.github_access_token:
+        login = fetch_github_user_login(user.github_access_token)
+        if login:
+            user.github_username = login
+            db.collection("users").document(user.uid).set({
+                "github_username": login,
+                "updated_at": firestore.SERVER_TIMESTAMP,
+            }, merge=True)
+            logger.info(f"Discovered and stored github_username '{login}' for UID {user.uid}")
 
     since = user.last_assigned_issue_update_time
     enqueued_tasks = []

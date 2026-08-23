@@ -40,6 +40,7 @@ class TestUserModel(unittest.TestCase):
     def test_user_dataclass_defaults_and_fields(self):
         user = User(
             github_access_token="gho_test_token_123",
+            github_username="brianquinlan",
             last_assigned_issue_update_time="2026-08-22T08:00:00Z",
             monitored_repos=["brianquinlan/marathon2", "google/jax"],
             uid="user_abc_123",
@@ -51,6 +52,7 @@ class TestUserModel(unittest.TestCase):
             github_id="12345678"
         )
         self.assertEqual(user.github_access_token, "gho_test_token_123")
+        self.assertEqual(user.github_username, "brianquinlan")
         self.assertEqual(user.last_assigned_issue_update_time, "2026-08-22T08:00:00Z")
         self.assertEqual(user.monitored_repos, ["brianquinlan/marathon2", "google/jax"])
         self.assertEqual(user.primary_provider, "github.com")
@@ -59,15 +61,18 @@ class TestUserModel(unittest.TestCase):
         # Test Pydantic JSON serialization
         json_str = user.model_dump_json()
         self.assertIn('"uid":"user_abc_123"', json_str.replace(" ", ""))
+        self.assertIn('"github_username":"brianquinlan"', json_str.replace(" ", ""))
         self.assertIn('"github_access_token":"gho_test_token_123"', json_str.replace(" ", ""))
         dumped = user.model_dump()
         self.assertEqual(dumped["uid"], "user_abc_123")
+        self.assertEqual(dumped["github_username"], "brianquinlan")
 
     def test_user_model_dump_and_model_validate(self):
         user = User(
             uid="user_999",
             email="google@domain.com",
             github_access_token="gho_xyz",
+            github_username="octocat",
             last_assigned_issue_update_time="2026-08-22T10:30:00Z",
             monitored_repos=["owner/repo1"],
             custom_data={"role": "maintainer"}
@@ -398,6 +403,7 @@ class TestJinjaSettingsPageCRUD(unittest.TestCase):
         mock_user_snap.exists = True
         mock_user_snap.to_dict.return_value = {
             "github_access_token": "ghp_secret12345678",
+            "gemini_api_key": "AIzaSySecretGeminiKey",
             "monitored_repos": ["brianquinlan/marathon2", "google/jax"]
         }
         mock_user_doc.get.return_value = mock_user_snap
@@ -416,6 +422,7 @@ class TestJinjaSettingsPageCRUD(unittest.TestCase):
         self.assertIn("<h2>Settings</h2>", html)
         self.assertIn("brianquinlan/marathon2, google/jax", html)
         self.assertIn('value="ghp_secret12345678"', html)
+        self.assertIn('value="AIzaSySecretGeminiKey"', html)
 
     @patch("main.auth.verify_id_token")
     @patch("main.db")
@@ -430,6 +437,7 @@ class TestJinjaSettingsPageCRUD(unittest.TestCase):
         mock_user_snap.exists = True
         mock_user_snap.to_dict.return_value = {
             "github_access_token": "ghp_new_updated_token_999",
+            "gemini_api_key": "AIzaSyNewGeminiKey",
             "monitored_repos": ["org/new-repo"]
         }
         mock_user_doc.get.return_value = mock_user_snap
@@ -443,6 +451,7 @@ class TestJinjaSettingsPageCRUD(unittest.TestCase):
         mock_req.headers = {}
         mock_req.form = {
             "github_access_token": "ghp_new_updated_token_999",
+            "gemini_api_key": "AIzaSyNewGeminiKey",
             "monitored_repos": "org/new-repo"
         }
 

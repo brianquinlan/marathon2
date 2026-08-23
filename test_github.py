@@ -24,7 +24,8 @@ from github import (
     start_user_github_sync,
     enqueue_issue_page_sync,
     enqueue_comment_page_sync,
-    get_user_stored_issues
+    get_user_stored_issues,
+    fetch_github_user_login
 )
 from user import User
 
@@ -255,6 +256,54 @@ class TestInitialSyncDispatcher(unittest.TestCase):
         # 3 filters (assigned, mentioned, created) + 2 monitored repos = 5 queues
         self.assertEqual(result["initial_queues_count"], 5)
         self.assertEqual(mock_enqueue.call_count, 5)
+
+
+class TestGitHubUserLoginDiscovery(unittest.TestCase):
+
+    @patch("requests.get")
+    def test_fetch_github_user_login_success(self, mock_get):
+        mock_resp = MagicMock()
+        mock_resp.status_code = 200
+        mock_resp.json.return_value = {"login": "brianquinlan", "id": 12345}
+        mock_get.return_value = mock_resp
+
+        login = fetch_github_user_login("gho_valid_token")
+        self.assertEqual(login, "brianquinlan")
+
+    @patch("requests.get")
+    def test_fetch_github_user_login_error_returns_none(self, mock_get):
+        mock_resp = MagicMock()
+        mock_resp.status_code = 401
+        mock_resp.text = "Bad credentials"
+        mock_get.return_value = mock_resp
+
+        login = fetch_github_user_login("gho_bad_token")
+        self.assertIsNone(login)
+
+    @patch("github.fetch_github_user_login")
+    @patch("github.enqueue_issue_page_sync")
+    def test_start_user_github_sync_discovers_username(self, mock_enqueue, mock_fetch_login):
+        mock_db = MagicMock()
+        mock_user_doc = MagicMock()
+        mock_db.collection.return_value.document.return_value = mock_user_doc
+
+        mock_fetch_login.return_value = "brianquinlan"
+
+        user = User(
+            uid="user_discover_1",
+            github_access_token="gho_tok_discover",
+            github_username=None,
+            monitored_repos=[]
+        )
+
+        res = start_user_github_sync(user=user, db=mock_db)
+        self.assertEqual(res["status"], "enqueued")
+        self.assertEqual(user.github_username, "brianquinlan")
+        mock_fetch_login.assert_called_once_with("gho_tok_discover")
+        mock_user_doc.set.assert_any_call(
+            {"github_username": "brianquinlan", "updated_at": unittest.mock.ANY},
+            merge=True
+        )
 
 
 class TestClosedIssuesSync(unittest.TestCase):

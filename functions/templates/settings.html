@@ -32,6 +32,11 @@
     </div>
     <br>
     <div>
+      <label for="gemini_api_key">Gemini API Key:</label><br>
+      <input type="text" id="gemini_api_key" name="gemini_api_key" value="{{ user.gemini_api_key or '' }}">
+    </div>
+    <br>
+    <div>
       <label for="monitored_repos">Monitored Repositories:</label><br>
       <input type="text" id="monitored_repos" name="monitored_repos" value="{{ user.monitored_repos|join(', ') if user.monitored_repos else '' }}">
     </div>
