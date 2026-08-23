@@ -1,20 +1,19 @@
-import sys
 import os
+import sys
 import unittest
 from unittest.mock import MagicMock, patch
-import json
-from datetime import datetime, timezone
+
 from flask import Response
 
 # Ensure functions module is in sys.path
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "functions"))
 
-from auth_utils import extract_provider_info, verify_bearer_token, fetch_full_user_auth_record
-from user import User
-from task import Task
-from github_sync import Issue, IssueType, Comment
 from firebase_functions import https_fn, tasks_fn
+
 import main
+from auth_utils import extract_provider_info
+from github_sync import Comment
+from user import User
 
 
 def get_callable_handler(func):
@@ -32,7 +31,6 @@ def get_callable_handler(func):
 
 
 class TestUserModel(unittest.TestCase):
-
     def test_user_dataclass_defaults_and_fields(self):
         user = User(
             github_access_token="gho_test_token_123",
@@ -45,7 +43,7 @@ class TestUserModel(unittest.TestCase):
             display_name="Dev Example",
             photo_url="https://avatar.example.com/1",
             primary_provider="github.com",
-            github_id="12345678"
+            github_id="12345678",
         )
         self.assertEqual(user.github_access_token, "gho_test_token_123")
         self.assertEqual(user.github_username, "brianquinlan")
@@ -71,7 +69,7 @@ class TestUserModel(unittest.TestCase):
             github_username="octocat",
             last_assigned_issue_update_time="2026-08-22T10:30:00Z",
             monitored_repos=["owner/repo1"],
-            custom_data={"role": "maintainer"}
+            custom_data={"role": "maintainer"},
         )
         data = user.model_dump()
         self.assertEqual(data["uid"], "user_999")
@@ -87,7 +85,6 @@ class TestUserModel(unittest.TestCase):
 
 
 class TestAuthProviderExtraction(unittest.TestCase):
-
     def test_extract_google_provider_info(self):
         token = {
             "uid": "google-user-123",
@@ -97,11 +94,8 @@ class TestAuthProviderExtraction(unittest.TestCase):
             "picture": "https://lh3.googleusercontent.com/a/sample",
             "firebase": {
                 "sign_in_provider": "google.com",
-                "identities": {
-                    "google.com": ["google-sub-id-987"],
-                    "email": ["alex@gmail.com"]
-                }
-            }
+                "identities": {"google.com": ["google-sub-id-987"], "email": ["alex@gmail.com"]},
+            },
         }
 
         info = extract_provider_info(token)
@@ -112,7 +106,6 @@ class TestAuthProviderExtraction(unittest.TestCase):
 
 
 class TestCallableFunctionLogic(unittest.TestCase):
-
     @patch("main.db")
     def test_associate_user_info_with_monitored_repos(self, mock_db):
         handler = get_callable_handler(main.associate_user_info)
@@ -129,7 +122,7 @@ class TestCallableFunctionLogic(unittest.TestCase):
         mock_req.auth.token = {
             "email": "user@github.com",
             "name": "GitHub Dev",
-            "firebase": {"sign_in_provider": "github.com", "identities": {"github.com": ["12345"]}}
+            "firebase": {"sign_in_provider": "github.com", "identities": {"github.com": ["12345"]}},
         }
         mock_req.data = {
             "github_access_token": "gho_sample_token_xyz",
@@ -152,18 +145,11 @@ class TestCallableFunctionLogic(unittest.TestCase):
         mock_doc_ref = MagicMock()
         mock_doc_snap = MagicMock()
         mock_doc_snap.exists = True
-        mock_doc_snap.to_dict.return_value = {
-            "uid": "user_sync_001",
-            "github_access_token": "gho_valid_token"
-        }
+        mock_doc_snap.to_dict.return_value = {"uid": "user_sync_001", "github_access_token": "gho_valid_token"}
         mock_doc_ref.get.return_value = mock_doc_snap
         mock_db.collection.return_value.document.return_value = mock_doc_ref
 
-        mock_sync_fn.return_value = {
-            "status": "enqueued",
-            "uid": "user_sync_001",
-            "initial_queues_count": 4
-        }
+        mock_sync_fn.return_value = {"status": "enqueued", "uid": "user_sync_001", "initial_queues_count": 4}
 
         mock_req = MagicMock(spec=https_fn.CallableRequest)
         mock_req.auth = MagicMock()
@@ -182,7 +168,7 @@ class TestCallableFunctionLogic(unittest.TestCase):
         mock_force_fn.return_value = {
             "status": "enqueued",
             "marked_count": 5,
-            "message": "Marked 5 tasks for rerank and enqueued ranking task."
+            "message": "Marked 5 tasks for rerank and enqueued ranking task.",
         }
 
         mock_req = MagicMock(spec=https_fn.CallableRequest)
@@ -196,7 +182,6 @@ class TestCallableFunctionLogic(unittest.TestCase):
 
 
 class TestTaskQueueSyncHandlers(unittest.TestCase):
-
     @patch("github_sync.enqueue_issue_page_sync")
     @patch("github_sync.enqueue_comment_page_sync")
     @patch("github_sync.process_and_save_issue_page")
@@ -210,25 +195,25 @@ class TestTaskQueueSyncHandlers(unittest.TestCase):
         mock_doc_ref = MagicMock()
         mock_doc_snap = MagicMock()
         mock_doc_snap.exists = True
-        mock_doc_snap.to_dict.return_value = {
-            "uid": "user_q_1",
-            "github_access_token": "gho_token_q1"
-        }
+        mock_doc_snap.to_dict.return_value = {"uid": "user_q_1", "github_access_token": "gho_token_q1"}
         mock_doc_ref.get.return_value = mock_doc_snap
         mock_db.collection.return_value.document.return_value = mock_doc_ref
 
         mock_fetch_page.return_value = (
-            [{"number": 100, "comments": 2, "comments_url": "https://api.github.com/comments/100", "repository": {"owner": {"login": "o"}, "name": "r"}}],
-            "https://api.github.com/issues?page=2"
+            [
+                {
+                    "number": 100,
+                    "comments": 2,
+                    "comments_url": "https://api.github.com/comments/100",
+                    "repository": {"owner": {"login": "o"}, "name": "r"},
+                }
+            ],
+            "https://api.github.com/issues?page=2",
         )
         mock_save_page.return_value = ["o_r_100"]
 
         mock_req = MagicMock(spec=tasks_fn.CallableRequest)
-        mock_req.data = {
-            "uid": "user_q_1",
-            "url": "https://api.github.com/issues",
-            "reason": "assigned"
-        }
+        mock_req.data = {"uid": "user_q_1", "url": "https://api.github.com/issues", "reason": "assigned"}
 
         result = handler(mock_req)
         assert isinstance(result, dict)
@@ -250,16 +235,13 @@ class TestTaskQueueSyncHandlers(unittest.TestCase):
         mock_doc_ref = MagicMock()
         mock_doc_snap = MagicMock()
         mock_doc_snap.exists = True
-        mock_doc_snap.to_dict.return_value = {
-            "uid": "user_q_2",
-            "github_access_token": "gho_token_q2"
-        }
+        mock_doc_snap.to_dict.return_value = {"uid": "user_q_2", "github_access_token": "gho_token_q2"}
         mock_doc_ref.get.return_value = mock_doc_snap
         mock_db.collection.return_value.document.return_value = mock_doc_ref
 
         mock_fetch_comments.return_value = (
             [Comment(id=1, user_login="alice", body="Test")],
-            "https://api.github.com/comments?page=2"
+            "https://api.github.com/comments?page=2",
         )
         mock_save_comments.return_value = 1
 
@@ -267,7 +249,7 @@ class TestTaskQueueSyncHandlers(unittest.TestCase):
         mock_req.data = {
             "uid": "user_q_2",
             "issue_doc_id": "o_r_100",
-            "comments_url": "https://api.github.com/comments"
+            "comments_url": "https://api.github.com/comments",
         }
 
         result = handler(mock_req)
@@ -278,14 +260,10 @@ class TestTaskQueueSyncHandlers(unittest.TestCase):
 
 
 class TestScheduledFunctions(unittest.TestCase):
-
     @patch("main.sync_all_users_closed_issues")
     @patch("main.db")
     def test_scheduled_sync_closed_issues_execution(self, mock_db, mock_sync_all):
-        mock_sync_all.return_value = {
-            "users_processed": 2,
-            "total_closed_tasks_removed": 3
-        }
+        mock_sync_all.return_value = {"users_processed": 2, "total_closed_tasks_removed": 3}
 
         handler = get_callable_handler(main.scheduled_sync_closed_issues)
         mock_event = MagicMock()
@@ -295,7 +273,6 @@ class TestScheduledFunctions(unittest.TestCase):
 
 
 class TestJinjaMainPageRendering(unittest.TestCase):
-
     def test_render_main_page_unauthenticated(self):
         handler = get_callable_handler(main.render_main_page)
         mock_req = MagicMock()
@@ -315,20 +292,13 @@ class TestJinjaMainPageRendering(unittest.TestCase):
     @patch("main.auth.verify_id_token")
     @patch("main.db")
     def test_render_main_page_authenticated_renders_ranked_tasks(self, mock_db, mock_verify):
-        mock_verify.return_value = {
-            "uid": "user_jinja_1",
-            "email": "tester@example.com",
-            "name": "Tester Dev"
-        }
+        mock_verify.return_value = {"uid": "user_jinja_1", "email": "tester@example.com", "name": "Tester Dev"}
 
         # Mock user document
         mock_user_doc = MagicMock()
         mock_user_snap = MagicMock()
         mock_user_snap.exists = True
-        mock_user_snap.to_dict.return_value = {
-            "display_name": "Tester Dev",
-            "email": "tester@example.com"
-        }
+        mock_user_snap.to_dict.return_value = {"display_name": "Tester Dev", "email": "tester@example.com"}
         mock_user_doc.get.return_value = mock_user_snap
 
         # Mock tasks collection
@@ -338,14 +308,14 @@ class TestJinjaMainPageRendering(unittest.TestCase):
             "github_issue_title": "Lower Priority Task",
             "priority": 0.30,
             "github_issue_url": "https://github.com/org/repo/issues/1",
-            "priority_needs_updated": False
+            "priority_needs_updated": False,
         }
         mock_task2 = MagicMock()
         mock_task2.to_dict.return_value = {
             "github_issue_title": "Top Priority Task",
             "priority": 0.95,
             "github_issue_url": "https://github.com/org/repo/issues/2",
-            "priority_needs_updated": True
+            "priority_needs_updated": True,
         }
         mock_tasks_col.stream.return_value = [mock_task1, mock_task2]
 
@@ -382,7 +352,6 @@ class TestJinjaMainPageRendering(unittest.TestCase):
 
 
 class TestJinjaSettingsPageCRUD(unittest.TestCase):
-
     def test_render_settings_page_unauthenticated_redirects(self):
         handler = get_callable_handler(main.render_settings_page)
         mock_req = MagicMock()
@@ -399,10 +368,7 @@ class TestJinjaSettingsPageCRUD(unittest.TestCase):
     @patch("main.auth.verify_id_token")
     @patch("main.db")
     def test_render_settings_page_get_authenticated(self, mock_db, mock_verify):
-        mock_verify.return_value = {
-            "uid": "user_settings_1",
-            "email": "dev@test.com"
-        }
+        mock_verify.return_value = {"uid": "user_settings_1", "email": "dev@test.com"}
 
         mock_user_doc = MagicMock()
         mock_user_snap = MagicMock()
@@ -410,7 +376,7 @@ class TestJinjaSettingsPageCRUD(unittest.TestCase):
         mock_user_snap.to_dict.return_value = {
             "github_access_token": "ghp_secret12345678",
             "gemini_api_key": "AIzaSySecretGeminiKey",
-            "monitored_repos": ["brianquinlan/marathon2", "google/jax"]
+            "monitored_repos": ["brianquinlan/marathon2", "google/jax"],
         }
         mock_user_doc.get.return_value = mock_user_snap
         mock_db.collection.return_value.document.return_value = mock_user_doc
@@ -434,10 +400,7 @@ class TestJinjaSettingsPageCRUD(unittest.TestCase):
     @patch("main.auth.verify_id_token")
     @patch("main.db")
     def test_render_settings_page_post_updates_and_renders_saved(self, mock_db, mock_verify):
-        mock_verify.return_value = {
-            "uid": "user_settings_2",
-            "email": "dev2@test.com"
-        }
+        mock_verify.return_value = {"uid": "user_settings_2", "email": "dev2@test.com"}
 
         mock_user_doc = MagicMock()
         mock_user_snap = MagicMock()
@@ -445,7 +408,7 @@ class TestJinjaSettingsPageCRUD(unittest.TestCase):
         mock_user_snap.to_dict.return_value = {
             "github_access_token": "ghp_new_updated_token_999",
             "gemini_api_key": "AIzaSyNewGeminiKey",
-            "monitored_repos": ["org/new-repo"]
+            "monitored_repos": ["org/new-repo"],
         }
         mock_user_doc.get.return_value = mock_user_snap
         mock_db.collection.return_value.document.return_value = mock_user_doc
@@ -459,7 +422,7 @@ class TestJinjaSettingsPageCRUD(unittest.TestCase):
         mock_req.form = {
             "github_access_token": "ghp_new_updated_token_999",
             "gemini_api_key": "AIzaSyNewGeminiKey",
-            "monitored_repos": "org/new-repo"
+            "monitored_repos": "org/new-repo",
         }
 
         resp = handler(mock_req)
@@ -471,7 +434,6 @@ class TestJinjaSettingsPageCRUD(unittest.TestCase):
 
 
 class TestFirestoreUserSettingsTrigger(unittest.TestCase):
-
     @patch("main.start_user_github_sync")
     @patch("main.db")
     def test_trigger_invoked_when_settings_newly_created(self, mock_db, mock_start_sync):
@@ -487,7 +449,7 @@ class TestFirestoreUserSettingsTrigger(unittest.TestCase):
         mock_after.exists = True
         mock_after.to_dict.return_value = {
             "github_access_token": "ghp_brand_new_token_123",
-            "monitored_repos": ["brianquinlan/marathon2"]
+            "monitored_repos": ["brianquinlan/marathon2"],
         }
 
         mock_event.data.before = mock_before
@@ -509,16 +471,10 @@ class TestFirestoreUserSettingsTrigger(unittest.TestCase):
         mock_event.params = {"uid": "user_trig_1"}
 
         mock_before = MagicMock()
-        mock_before.to_dict.return_value = {
-            "github_access_token": "ghp_old_token",
-            "monitored_repos": ["org/repo"]
-        }
+        mock_before.to_dict.return_value = {"github_access_token": "ghp_old_token", "monitored_repos": ["org/repo"]}
 
         mock_after = MagicMock()
-        mock_after.to_dict.return_value = {
-            "github_access_token": "ghp_new_token",
-            "monitored_repos": ["org/repo"]
-        }
+        mock_after.to_dict.return_value = {"github_access_token": "ghp_new_token", "monitored_repos": ["org/repo"]}
 
         mock_event.data.before = mock_before
         mock_event.data.after = mock_after
@@ -538,15 +494,12 @@ class TestFirestoreUserSettingsTrigger(unittest.TestCase):
         mock_event.params = {"uid": "user_trig_2"}
 
         mock_before = MagicMock()
-        mock_before.to_dict.return_value = {
-            "github_access_token": "ghp_token_same",
-            "monitored_repos": ["org/repo1"]
-        }
+        mock_before.to_dict.return_value = {"github_access_token": "ghp_token_same", "monitored_repos": ["org/repo1"]}
 
         mock_after = MagicMock()
         mock_after.to_dict.return_value = {
             "github_access_token": "ghp_token_same",
-            "monitored_repos": ["org/repo1", "org/repo2"]
+            "monitored_repos": ["org/repo1", "org/repo2"],
         }
 
         mock_event.data.before = mock_before
@@ -568,14 +521,14 @@ class TestFirestoreUserSettingsTrigger(unittest.TestCase):
         mock_before.to_dict.return_value = {
             "github_access_token": "ghp_token_same",
             "monitored_repos": ["org/repo1"],
-            "last_assigned_issue_update_time": "2026-08-22T00:00:00Z"
+            "last_assigned_issue_update_time": "2026-08-22T00:00:00Z",
         }
 
         mock_after = MagicMock()
         mock_after.to_dict.return_value = {
             "github_access_token": "ghp_token_same",
             "monitored_repos": ["org/repo1"],
-            "last_assigned_issue_update_time": "2026-08-22T01:00:00Z"
+            "last_assigned_issue_update_time": "2026-08-22T01:00:00Z",
         }
 
         mock_event.data.before = mock_before
@@ -596,9 +549,7 @@ class TestFirestoreUserSettingsTrigger(unittest.TestCase):
         mock_before.to_dict.return_value = {}
 
         mock_after = MagicMock()
-        mock_after.to_dict.return_value = {
-            "monitored_repos": ["org/repo1"]
-        }
+        mock_after.to_dict.return_value = {"monitored_repos": ["org/repo1"]}
 
         mock_event.data.before = mock_before
         mock_event.data.after = mock_after
@@ -608,7 +559,6 @@ class TestFirestoreUserSettingsTrigger(unittest.TestCase):
 
 
 class TestFirestoreTaskTrigger(unittest.TestCase):
-
     @patch("main.enqueue_task_ranking")
     @patch("main.db")
     def test_task_trigger_invoked_when_new_task_created_with_needs_update(self, mock_db, mock_enqueue_ranking):
@@ -622,7 +572,7 @@ class TestFirestoreTaskTrigger(unittest.TestCase):
             "id": "task_issue_1",
             "priority": 0.0,
             "priority_needs_updated": True,
-            "title": "Bugfix issue"
+            "title": "Bugfix issue",
         }
 
         mock_event.data.before = None
@@ -630,10 +580,7 @@ class TestFirestoreTaskTrigger(unittest.TestCase):
 
         handler(mock_event)
         mock_enqueue_ranking.assert_called_once_with(
-            uid="user_task_trig_1",
-            task_id="task_issue_1",
-            function_name="rank_user_tasks",
-            db=mock_db
+            uid="user_task_trig_1", task_id="task_issue_1", function_name="rank_user_tasks", db=mock_db
         )
 
     @patch("main.enqueue_task_ranking")
@@ -663,10 +610,7 @@ class TestFirestoreTaskTrigger(unittest.TestCase):
 
         handler(mock_event)
         mock_enqueue_ranking.assert_called_once_with(
-            uid="user_task_trig_2",
-            task_id="task_issue_2",
-            function_name="rank_user_tasks",
-            db=mock_db
+            uid="user_task_trig_2", task_id="task_issue_2", function_name="rank_user_tasks", db=mock_db
         )
 
     @patch("main.enqueue_task_ranking")

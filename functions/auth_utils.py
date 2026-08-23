@@ -3,8 +3,8 @@ Authentication utility helpers for Firebase Python backend.
 Supports identifying and verifying Google and GitHub OAuth providers.
 """
 
-from typing import Dict, List, Optional
 import logging
+
 from firebase_admin import auth
 from firebase_functions import https_fn
 
@@ -16,7 +16,7 @@ SUPPORTED_PROVIDERS = {
 }
 
 
-def extract_provider_info(token_dict: Dict[str, object]) -> Dict[str, object]:
+def extract_provider_info(token_dict: dict[str, object]) -> dict[str, object]:
     """
     Extracts provider-specific information from a decoded Firebase ID token.
     """
@@ -26,13 +26,11 @@ def extract_provider_info(token_dict: Dict[str, object]) -> Dict[str, object]:
     raw_identities = firebase_meta.get("identities")
     identities = raw_identities if isinstance(raw_identities, dict) else {}
 
-    linked_providers: List[str] = list(identities.keys())
-    
+    linked_providers: list[str] = list(identities.keys())
+
     # Check if primary or linked providers include Google or GitHub
     supported_linked = [
-        {"id": pid, "name": SUPPORTED_PROVIDERS.get(pid, pid)}
-        for pid in linked_providers
-        if pid in SUPPORTED_PROVIDERS
+        {"id": pid, "name": SUPPORTED_PROVIDERS.get(pid, pid)} for pid in linked_providers if pid in SUPPORTED_PROVIDERS
     ]
 
     google_identities = identities.get("google.com")
@@ -53,16 +51,16 @@ def extract_provider_info(token_dict: Dict[str, object]) -> Dict[str, object]:
     }
 
 
-def fetch_full_user_auth_record(uid: str) -> Dict[str, object]:
+def fetch_full_user_auth_record(uid: str) -> dict[str, object]:
     """
     Fetches the complete user record from Firebase Auth via Admin SDK,
     including providerData for Google and GitHub accounts.
     """
     try:
         user_record = auth.get_user(uid)
-        providers: List[Dict[str, object]] = []
+        providers: list[dict[str, object]] = []
         for p in user_record.provider_data:
-            provider_info: Dict[str, object] = {
+            provider_info: dict[str, object] = {
                 "provider_id": p.provider_id,
                 "provider_name": SUPPORTED_PROVIDERS.get(p.provider_id, p.provider_id),
                 "uid": p.uid,
@@ -89,40 +87,36 @@ def fetch_full_user_auth_record(uid: str) -> Dict[str, object]:
         return {"uid": uid, "error": str(e)}
 
 
-def verify_bearer_token(auth_header: Optional[str]) -> Dict[str, object]:
+def verify_bearer_token(auth_header: str | None) -> dict[str, object]:
     """
     Validates standard Authorization: Bearer <ID_TOKEN> headers for HTTP endpoints.
     Raises HttpsError if invalid or missing.
     """
     if not auth_header:
         raise https_fn.HttpsError(
-            code=https_fn.FunctionsErrorCode.UNAUTHENTICATED,
-            message="Missing Authorization header."
+            code=https_fn.FunctionsErrorCode.UNAUTHENTICATED, message="Missing Authorization header."
         )
 
     parts = auth_header.strip().split(" ")
     if len(parts) != 2 or parts[0].lower() != "bearer":
         raise https_fn.HttpsError(
             code=https_fn.FunctionsErrorCode.UNAUTHENTICATED,
-            message="Invalid Authorization header format. Expected 'Bearer <token>'."
+            message="Invalid Authorization header format. Expected 'Bearer <token>'.",
         )
 
     token = parts[1]
     try:
         decoded_token = auth.verify_id_token(token)
         return decoded_token if isinstance(decoded_token, dict) else {}
-    except auth.ExpiredIdTokenError:
+    except auth.ExpiredIdTokenError as err:
         raise https_fn.HttpsError(
-            code=https_fn.FunctionsErrorCode.UNAUTHENTICATED,
-            message="Firebase ID token has expired."
-        )
-    except auth.InvalidIdTokenError:
+            code=https_fn.FunctionsErrorCode.UNAUTHENTICATED, message="Firebase ID token has expired."
+        ) from err
+    except auth.InvalidIdTokenError as err:
         raise https_fn.HttpsError(
-            code=https_fn.FunctionsErrorCode.UNAUTHENTICATED,
-            message="Invalid Firebase ID token."
-        )
+            code=https_fn.FunctionsErrorCode.UNAUTHENTICATED, message="Invalid Firebase ID token."
+        ) from err
     except Exception as e:
         raise https_fn.HttpsError(
-            code=https_fn.FunctionsErrorCode.UNAUTHENTICATED,
-            message=f"Authentication failed: {str(e)}"
-        )
+            code=https_fn.FunctionsErrorCode.UNAUTHENTICATED, message=f"Authentication failed: {e!s}"
+        ) from e

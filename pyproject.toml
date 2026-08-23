@@ -19,6 +19,7 @@ dependencies = [
     "requests>=2.31.0",
     "jinja2>=3.1.2",
     "PyGithub>=2.10.0",
+    "ruff>=0.1.0",
 ]
 
 [tool.hatch.build.targets.wheel]
@@ -29,6 +30,7 @@ skip-install = true
 dependencies = [
     "pyright",
     "pytest",
+    "ruff",
     "firebase-functions>=0.4.0",
     "firebase-admin>=6.5.0",
     "google-cloud-firestore>=2.16.0",
@@ -44,7 +46,25 @@ dependencies = [
 [tool.hatch.envs.default.scripts]
 test = "python -m unittest discover -s . -p \"test_*.py\""
 types = "pyright"
+lint = "ruff check ."
+format = "ruff format ."
 all = [
-    "python -m unittest discover -s . -p \"test_*.py\"",
+    "ruff check .",
     "pyright",
+    "python -m unittest discover -s . -p \"test_*.py\"",
 ]
+
+[tool.ruff]
+line-length = 120
+target-version = "py310"
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "UP", "B", "RUF"]
+ignore = [
+    "E501",  # Line too long (managed by formatter)
+    "B008",  # Do not perform function calls in argument defaults (standard in Pydantic Field)
+]
+
+[tool.ruff.lint.isort]
+known-first-party = ["functions", "user", "task", "github_sync", "genai_ranker", "auth_utils", "main"]
+

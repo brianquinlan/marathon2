@@ -4,41 +4,34 @@ Tests GitHub data structures, PyGithub adaptors, single-page issue & comment fet
 Firestore persistence, and ensuring Tasks are ONLY created once an Issue and all comments are fully imported.
 """
 
-import sys
 import os
+import sys
 import unittest
-from unittest.mock import MagicMock, patch, ANY
 from datetime import datetime, timezone
+from unittest.mock import ANY, MagicMock, patch
 
 # Add functions to path
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "functions"))
 
 from github_sync import (
-    Issue,
-    IssueType,
     AssociationReason,
     Comment,
-    get_github_client,
+    Issue,
+    IssueType,
     comment_from_pygithub,
-    issue_from_pygithub,
-    fetch_single_issue_page_pygithub,
-    fetch_single_comment_page_pygithub,
-    fetch_single_issue_page,
-    fetch_single_comment_page,
-    process_and_save_issue_page,
-    process_and_save_comment_page,
-    start_user_github_sync,
-    enqueue_issue_page_sync,
-    enqueue_comment_page_sync,
-    get_user_stored_issues,
     fetch_github_user_login,
-    sync_closed_issues_for_user
+    fetch_single_comment_page,
+    fetch_single_issue_page,
+    issue_from_pygithub,
+    process_and_save_comment_page,
+    process_and_save_issue_page,
+    start_user_github_sync,
+    sync_closed_issues_for_user,
 )
 from user import User
 
 
 class TestGitHubDataStructures(unittest.TestCase):
-
     def test_comment_model_and_json_serialization(self):
         raw_api = {
             "id": 1001,
@@ -93,7 +86,6 @@ class TestGitHubDataStructures(unittest.TestCase):
 
 
 class TestPyGithubAdaptors(unittest.TestCase):
-
     def test_comment_from_pygithub(self):
         mock_pygh_comment = MagicMock()
         mock_pygh_comment.id = 7788
@@ -136,7 +128,6 @@ class TestPyGithubAdaptors(unittest.TestCase):
 
 
 class TestSinglePageFetchingAndPagination(unittest.TestCase):
-
     @patch("github_sync.fetch_single_issue_page_pygithub")
     @patch("github_sync.get_github_client")
     def test_fetch_single_issue_page_with_next_link(self, mock_get_client, mock_fetch_pygh):
@@ -164,7 +155,7 @@ class TestSinglePageFetchingAndPagination(unittest.TestCase):
         items, next_url = fetch_single_issue_page(
             "https://api.github.com/issues",
             headers={"Authorization": "Bearer test"},
-            params={"page": 0, "per_page": 100}
+            params={"page": 0, "per_page": 100},
         )
         self.assertEqual(len(items), 1)
         self.assertEqual(items[0]["number"], 1)
@@ -180,14 +171,14 @@ class TestSinglePageFetchingAndPagination(unittest.TestCase):
             id=501,
             user_login="reviewer",
             body="Looks good",
-            created_at=datetime(2026, 8, 22, 10, 0, tzinfo=timezone.utc)
+            created_at=datetime(2026, 8, 22, 10, 0, tzinfo=timezone.utc),
         )
         mock_fetch_pygh.return_value = ([mock_comment], True)
 
         comments, next_url = fetch_single_comment_page(
             "https://api.github.com/repos/org/repo/issues/10/comments",
             headers={"Authorization": "Bearer test"},
-            params={"page": 0, "per_page": 100}
+            params={"page": 0, "per_page": 100},
         )
         self.assertEqual(len(comments), 1)
         self.assertEqual(comments[0].id, 501)
@@ -195,7 +186,6 @@ class TestSinglePageFetchingAndPagination(unittest.TestCase):
 
 
 class TestPageProcessingAndTaskCreationTiming(unittest.TestCase):
-
     def test_process_and_save_issue_page_with_comments_does_not_create_task_yet(self):
         mock_db = MagicMock()
         mock_user_doc = MagicMock()
@@ -217,17 +207,12 @@ class TestPageProcessingAndTaskCreationTiming(unittest.TestCase):
                 "repository": {"owner": {"login": "org"}, "name": "repo"},
                 "user": {"login": "author"},
                 "comments": 5,  # Has 5 comments to fetch
-                "comments_url": "https://api.github.com/repos/org/repo/issues/10/comments"
+                "comments_url": "https://api.github.com/repos/org/repo/issues/10/comments",
             }
         ]
 
         with patch("github_sync.ensure_task_for_issue") as mock_ensure_task:
-            saved_ids = process_and_save_issue_page(
-                uid="user_123",
-                raw_items=raw_items,
-                reason="assigned",
-                db=mock_db
-            )
+            saved_ids = process_and_save_issue_page(uid="user_123", raw_items=raw_items, reason="assigned", db=mock_db)
             self.assertEqual(saved_ids, ["org_repo_10"])
             mock_issue_ref.set.assert_called_once()
             # Task must NOT be created yet because comments are still pending!
@@ -254,17 +239,12 @@ class TestPageProcessingAndTaskCreationTiming(unittest.TestCase):
                 "repository": {"owner": {"login": "org"}, "name": "repo"},
                 "user": {"login": "author"},
                 "comments": 0,  # Zero comments
-                "comments_url": "https://api.github.com/repos/org/repo/issues/11/comments"
+                "comments_url": "https://api.github.com/repos/org/repo/issues/11/comments",
             }
         ]
 
         with patch("github_sync.ensure_task_for_issue") as mock_ensure_task:
-            saved_ids = process_and_save_issue_page(
-                uid="user_123",
-                raw_items=raw_items,
-                reason="assigned",
-                db=mock_db
-            )
+            saved_ids = process_and_save_issue_page(uid="user_123", raw_items=raw_items, reason="assigned", db=mock_db)
             self.assertEqual(saved_ids, ["org_repo_11"])
             mock_issue_ref.set.assert_called_once()
             # Task is created immediately because all (0) comments are imported
@@ -280,7 +260,7 @@ class TestPageProcessingAndTaskCreationTiming(unittest.TestCase):
         mock_doc_snap.exists = True
         mock_doc_snap.to_dict.return_value = {
             "title": "Issue with comments",
-            "comments": [{"id": 1, "user_login": "u1", "body": "c1"}]
+            "comments": [{"id": 1, "user_login": "u1", "body": "c1"}],
         }
         mock_issue_ref.get.return_value = mock_doc_snap
 
@@ -295,29 +275,20 @@ class TestPageProcessingAndTaskCreationTiming(unittest.TestCase):
         with patch("github_sync.ensure_task_for_issue") as mock_ensure_task:
             # Intermediate comment page (is_last_page=False)
             saved_count = process_and_save_comment_page(
-                uid="user_123",
-                issue_doc_id="org_repo_10",
-                new_comments=new_comments,
-                db=mock_db,
-                is_last_page=False
+                uid="user_123", issue_doc_id="org_repo_10", new_comments=new_comments, db=mock_db, is_last_page=False
             )
             self.assertEqual(saved_count, 1)
             mock_ensure_task.assert_not_called()
 
             # Final comment page (is_last_page=True) -> Task created!
             saved_count2 = process_and_save_comment_page(
-                uid="user_123",
-                issue_doc_id="org_repo_10",
-                new_comments=new_comments,
-                db=mock_db,
-                is_last_page=True
+                uid="user_123", issue_doc_id="org_repo_10", new_comments=new_comments, db=mock_db, is_last_page=True
             )
             self.assertEqual(saved_count2, 1)
             mock_ensure_task.assert_called_once()
 
 
 class TestInitialSyncDispatcher(unittest.TestCase):
-
     @patch("github_sync.enqueue_issue_page_sync")
     def test_start_user_github_sync(self, mock_enqueue):
         mock_db = MagicMock()
@@ -327,7 +298,7 @@ class TestInitialSyncDispatcher(unittest.TestCase):
         user = User(
             uid="user_123",
             github_access_token="gho_token_123",
-            monitored_repos=["google/jax", "brianquinlan/marathon2"]
+            monitored_repos=["google/jax", "brianquinlan/marathon2"],
         )
 
         result = start_user_github_sync(user=user, db=mock_db)
@@ -338,7 +309,6 @@ class TestInitialSyncDispatcher(unittest.TestCase):
 
 
 class TestGitHubUserLoginDiscovery(unittest.TestCase):
-
     @patch("github_sync.get_github_client")
     def test_fetch_github_user_login_success(self, mock_get_client):
         mock_client = MagicMock()
@@ -369,24 +339,17 @@ class TestGitHubUserLoginDiscovery(unittest.TestCase):
         mock_fetch_login.return_value = "brianquinlan"
 
         user = User(
-            uid="user_discover_1",
-            github_access_token="gho_tok_discover",
-            github_username=None,
-            monitored_repos=[]
+            uid="user_discover_1", github_access_token="gho_tok_discover", github_username=None, monitored_repos=[]
         )
 
         res = start_user_github_sync(user=user, db=mock_db)
         self.assertEqual(res["status"], "enqueued")
         self.assertEqual(user.github_username, "brianquinlan")
         mock_fetch_login.assert_called_once_with("gho_tok_discover")
-        mock_user_doc.set.assert_any_call(
-            {"github_username": "brianquinlan", "updated_at": ANY},
-            merge=True
-        )
+        mock_user_doc.set.assert_any_call({"github_username": "brianquinlan", "updated_at": ANY}, merge=True)
 
 
 class TestClosedIssuesSync(unittest.TestCase):
-
     @patch("github_sync.fetch_single_issue_page")
     def test_sync_closed_issues_for_user_deletes_tasks_and_updates_issue(self, mock_fetch):
         mock_db = MagicMock()
@@ -405,7 +368,9 @@ class TestClosedIssuesSync(unittest.TestCase):
         mock_task_ref.get.return_value = mock_task_snap
 
         mock_db.collection.return_value.document.return_value = mock_user_doc
-        mock_user_doc.collection.side_effect = lambda col_name: mock_issues_col if col_name == "issues" else mock_tasks_col
+        mock_user_doc.collection.side_effect = lambda col_name: (
+            mock_issues_col if col_name == "issues" else mock_tasks_col
+        )
         mock_issues_col.document.return_value = mock_issue_ref
         mock_tasks_col.document.return_value = mock_task_ref
 
@@ -415,16 +380,14 @@ class TestClosedIssuesSync(unittest.TestCase):
                 {
                     "number": 99,
                     "state": "closed",
-                    "repository": {"owner": {"login": "brianquinlan"}, "name": "marathon2"}
+                    "repository": {"owner": {"login": "brianquinlan"}, "name": "marathon2"},
                 }
             ],
-            None
+            None,
         )
 
         user = User(
-            uid="user_closed_1",
-            github_access_token="gho_test_closed",
-            monitored_repos=["brianquinlan/marathon2"]
+            uid="user_closed_1", github_access_token="gho_test_closed", monitored_repos=["brianquinlan/marathon2"]
         )
 
         res = sync_closed_issues_for_user(user=user, db=mock_db)

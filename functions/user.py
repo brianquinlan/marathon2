@@ -1,38 +1,38 @@
 from datetime import datetime
-from typing import Dict, List, Optional
-from pydantic import BaseModel, Field, ConfigDict, field_serializer
+
+from pydantic import BaseModel, ConfigDict, Field, field_serializer
 
 
 class User(BaseModel):
     model_config = ConfigDict(arbitrary_types_allowed=True)
 
     # User-specific application data
-    github_access_token: Optional[str] = None
-    github_username: Optional[str] = None
-    gemini_api_key: Optional[str] = None
-    last_assigned_issue_update_time: Optional[str] = None
-    monitored_repos: List[str] = Field(default_factory=list)
+    github_access_token: str | None = None
+    github_username: str | None = None
+    gemini_api_key: str | None = None
+    last_assigned_issue_update_time: str | None = None
+    monitored_repos: list[str] = Field(default_factory=list)
 
     # Firebase Authentication & Profile fields
-    uid: Optional[str] = None
-    email: Optional[str] = None
+    uid: str | None = None
+    email: str | None = None
     email_verified: bool = False
-    display_name: Optional[str] = None
-    photo_url: Optional[str] = None
-    primary_provider: Optional[str] = None
-    google_id: Optional[str] = None
-    github_id: Optional[str] = None
-    linked_providers: List[str] = Field(default_factory=list)
+    display_name: str | None = None
+    photo_url: str | None = None
+    primary_provider: str | None = None
+    google_id: str | None = None
+    github_id: str | None = None
+    linked_providers: list[str] = Field(default_factory=list)
 
     # Additional custom associated metadata
-    custom_data: Dict[str, object] = Field(default_factory=dict)
+    custom_data: dict[str, object] = Field(default_factory=dict)
 
     # Timestamps (can be datetime, ISO string, or Firestore SERVER_TIMESTAMP Sentinel)
-    created_at: Optional[datetime | str | object] = None
-    updated_at: Optional[datetime | str | object] = None
+    created_at: datetime | str | object | None = None
+    updated_at: datetime | str | object | None = None
 
     @field_serializer("created_at", "updated_at", when_used="json")
-    def serialize_timestamps(self, v: Optional[datetime | str | object]) -> Optional[str]:
+    def serialize_timestamps(self, v: datetime | str | object | None) -> str | None:
         if v is None:
             return None
         if isinstance(v, datetime):
@@ -42,18 +42,18 @@ class User(BaseModel):
     @classmethod
     def from_auth_token(
         cls,
-        token_dict: Dict[str, object],
-        provider_info: Dict[str, object],
-        github_access_token: Optional[str] = None,
-        last_assigned_issue_update_time: Optional[str] = None,
-        monitored_repos: Optional[List[str]] = None,
-        custom_data: Optional[Dict[str, object]] = None,
+        token_dict: dict[str, object],
+        provider_info: dict[str, object],
+        github_access_token: str | None = None,
+        last_assigned_issue_update_time: str | None = None,
+        monitored_repos: list[str] | None = None,
+        custom_data: dict[str, object] | None = None,
     ) -> "User":
         """
         Creates a User dataclass instance populated with authentication claims from a decoded Firebase ID token.
         """
         raw_linked = provider_info.get("linked_providers")
-        linked_list: List[str] = [str(x) for x in raw_linked] if isinstance(raw_linked, list) else []
+        linked_list: list[str] = [str(x) for x in raw_linked] if isinstance(raw_linked, list) else []
 
         raw_verified = token_dict.get("email_verified")
         email_verified = bool(raw_verified) if raw_verified is not None else False

@@ -4,27 +4,29 @@ Tests Task dataclass, issue reference handling, priority_needs_updated flag mana
 ranker execution, asynchronous Firebase task_queue enqueuing, and decoupled forced reranking.
 """
 
-import sys
 import os
+import sys
 import unittest
 from unittest.mock import MagicMock, patch
-from datetime import datetime, timezone
 
 # Add functions to path
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "functions"))
 
-from task import (
-    Task,
+from firebase_functions import tasks_fn
+
+import main
+from genai_ranker import (
     TaskPriorityOutput,
     run_ranker,
-    ensure_task_for_issue,
-    update_task_priority,
-    force_rerank_tasks,
-    enqueue_task_ranking,
-    get_user_tasks
 )
-from firebase_functions import tasks_fn
-import main
+from task import (
+    Task,
+    enqueue_task_ranking,
+    ensure_task_for_issue,
+    force_rerank_tasks,
+    get_user_tasks,
+    update_task_priority,
+)
 
 
 def get_callable_handler(func):
@@ -42,7 +44,6 @@ def get_callable_handler(func):
 
 
 class TestTaskModel(unittest.TestCase):
-
     def test_task_model_defaults_properties_and_json_serialization(self):
         task = Task(
             id="task_owner_repo_1",
@@ -51,7 +52,7 @@ class TestTaskModel(unittest.TestCase):
             github_issue_id="owner_repo_1",
             uid="user_123",
             github_issue_title="Fix high priority bug",
-            github_issue_url="https://github.com/owner/repo/issues/1"
+            github_issue_url="https://github.com/owner/repo/issues/1",
         )
         self.assertEqual(task.doc_id, "task_owner_repo_1")
         self.assertEqual(task.priority, 0.85)
@@ -62,7 +63,7 @@ class TestTaskModel(unittest.TestCase):
         json_str = task.model_dump_json()
         self.assertIn('"priority":0.85', json_str.replace(" ", ""))
         self.assertIn('"github_issue_title":"Fix high priority bug"', json_str)
-        
+
         # Test dictionary conversion via model_dump
         dumped = task.model_dump()
         self.assertEqual(dumped["id"], "task_owner_repo_1")
@@ -83,11 +84,7 @@ class TestTaskModel(unittest.TestCase):
 
         mock_ref = FakeDocRef()
 
-        task = Task(
-            github_issue_id="owner_repo_1",
-            github_issue_ref=mock_ref,
-            uid="user_123"
-        )
+        task = Task(github_issue_id="owner_repo_1", github_issue_ref=mock_ref, uid="user_123")
         self.assertEqual(task.doc_id, "task_owner_repo_1")
 
         d_dump = task.model_dump()
@@ -103,12 +100,10 @@ class TestTaskModel(unittest.TestCase):
 
 
 class TestRankerEngine(unittest.TestCase):
-
     def test_run_ranker_with_pydantic_ai_agent(self):
         mock_agent = MagicMock()
         mock_output = TaskPriorityOutput(
-            priority=0.92,
-            reasoning="Current user @brian is explicitly mentioned in comments asking for a blocker fix."
+            priority=0.92, reasoning="Current user @brian is explicitly mentioned in comments asking for a blocker fix."
         )
         mock_res = MagicMock()
         mock_res.output = mock_output
@@ -121,12 +116,7 @@ class TestRankerEngine(unittest.TestCase):
 
         mock_agent.run_sync.side_effect = fake_run_sync
 
-        task = Task(
-            id="task_1",
-            priority=0.0,
-            priority_needs_updated=True,
-            github_issue_title="Critical Blocker"
-        )
+        task = Task(id="task_1", priority=0.0, priority_needs_updated=True, github_issue_title="Critical Blocker")
         issue_data = {
             "title": "Critical Blocker",
             "body": "System down due to null pointer.",
@@ -135,17 +125,13 @@ class TestRankerEngine(unittest.TestCase):
                 {
                     "user_login": "charlie",
                     "body": "Hey @brian please check this ASAP",
-                    "created_at": "2026-08-22T12:00:00Z"
+                    "created_at": "2026-08-22T12:00:00Z",
                 }
-            ]
+            ],
         }
 
         ranked = run_ranker(
-            task=task,
-            issue=issue_data,
-            github_username="brian",
-            gemini_api_key="AIzaSyRankerKey",
-            agent=mock_agent
+            task=task, issue=issue_data, github_username="brian", gemini_api_key="AIzaSyRankerKey", agent=mock_agent
         )
         self.assertEqual(ranked.priority, 0.92)
         self.assertFalse(ranked.priority_needs_updated)
@@ -155,6 +141,7 @@ class TestRankerEngine(unittest.TestCase):
     @patch("genai_ranker.Agent")
     def test_get_pydantic_ai_agent_uses_gemini_api_key(self, mock_agent_cls, mock_model_cls, mock_provider_cls):
         from genai_ranker import _pydantic_ai_agents, get_pydantic_ai_agent
+
         _pydantic_ai_agents.clear()
         mock_agent_instance = MagicMock()
         mock_agent_cls.return_value = mock_agent_instance
@@ -175,7 +162,6 @@ class TestRankerEngine(unittest.TestCase):
 
 
 class TestTaskFirestoreOperations(unittest.TestCase):
-
     def test_ensure_task_for_issue_creation_and_update(self):
         mock_db = MagicMock()
         mock_user_doc = MagicMock()
@@ -194,7 +180,7 @@ class TestTaskFirestoreOperations(unittest.TestCase):
             uid="user_100",
             issue_id="org_repo_1",
             issue_data={"title": "Brand new issue", "url": "https://github.com/org/repo/issues/1"},
-            db=mock_db
+            db=mock_db,
         )
         self.assertEqual(task.doc_id, "task_org_repo_1")
         self.assertTrue(task.priority_needs_updated)
@@ -209,7 +195,7 @@ class TestTaskFirestoreOperations(unittest.TestCase):
             "priority": 0.7,
             "priority_needs_updated": False,
             "github_issue_id": "org_repo_1",
-            "github_issue_title": "Old title"
+            "github_issue_title": "Old title",
         }
         mock_task_ref.set.reset_mock()
 
@@ -217,7 +203,7 @@ class TestTaskFirestoreOperations(unittest.TestCase):
             uid="user_100",
             issue_id="org_repo_1",
             issue_data={"title": "Updated issue title", "url": "https://github.com/org/repo/issues/1"},
-            db=mock_db
+            db=mock_db,
         )
         self.assertTrue(updated_task.priority_needs_updated)
         self.assertEqual(updated_task.github_issue_title, "Updated issue title")
@@ -240,7 +226,7 @@ class TestTaskFirestoreOperations(unittest.TestCase):
             "github_issue_id": "org_repo_10",
             "priority": 0.0,
             "priority_needs_updated": True,
-            "github_issue_title": "Needs rank"
+            "github_issue_title": "Needs rank",
         }
         mock_task_ref.get.return_value = mock_task_snap
 
@@ -249,16 +235,13 @@ class TestTaskFirestoreOperations(unittest.TestCase):
         mock_issue_snap.to_dict.return_value = {
             "title": "Issue 10",
             "body": "Description",
-            "comments": [{"user_login": "bob", "body": "Comment text"}]
+            "comments": [{"user_login": "bob", "body": "Comment text"}],
         }
         mock_issue_ref.get.return_value = mock_issue_snap
 
         mock_user_snap = MagicMock()
         mock_user_snap.exists = True
-        mock_user_snap.to_dict.return_value = {
-            "github_username": "brian_dev",
-            "gemini_api_key": "AIzaSyUserDocKey"
-        }
+        mock_user_snap.to_dict.return_value = {"github_username": "brian_dev", "gemini_api_key": "AIzaSyUserDocKey"}
         mock_user_doc.get.return_value = mock_user_snap
 
         def col_side_effect(name):
@@ -274,10 +257,7 @@ class TestTaskFirestoreOperations(unittest.TestCase):
         mock_db.collection.return_value.document.return_value = mock_user_doc
 
         ranked_mock_task = Task(
-            id="task_issue_10",
-            github_issue_id="org_repo_10",
-            priority=0.88,
-            priority_needs_updated=False
+            id="task_issue_10", github_issue_id="org_repo_10", priority=0.88, priority_needs_updated=False
         )
         mock_run_ranker.return_value = ranked_mock_task
 
@@ -286,7 +266,7 @@ class TestTaskFirestoreOperations(unittest.TestCase):
         self.assertEqual(result["task_id"], "task_issue_10")
         self.assertEqual(result["priority"], 0.88)
         mock_run_ranker.assert_called_once()
-        args, kwargs = mock_run_ranker.call_args
+        _args, kwargs = mock_run_ranker.call_args
         self.assertEqual(kwargs.get("github_username"), "brian_dev")
         self.assertEqual(kwargs.get("gemini_api_key"), "AIzaSyUserDocKey")
         self.assertEqual(kwargs.get("issue"), mock_issue_snap.to_dict.return_value)
@@ -327,7 +307,7 @@ class TestTaskFirestoreOperations(unittest.TestCase):
 
         mock_task_queue.assert_called_once_with("rank_user_tasks")
         mock_queue.enqueue.assert_called_once()
-        args, kwargs = mock_queue.enqueue.call_args
+        args, _kwargs = mock_queue.enqueue.call_args
         self.assertEqual(args[0], {"uid": "user_task_queue_1", "task_id": "task_abc_1"})
 
     @patch("threading.Thread")
@@ -364,7 +344,6 @@ class TestTaskFirestoreOperations(unittest.TestCase):
 
 
 class TestTaskQueueFunction(unittest.TestCase):
-
     @patch("main.update_task_priority")
     @patch("main.db")
     def test_rank_user_tasks_task_queue_handler(self, mock_db, mock_update_fn):

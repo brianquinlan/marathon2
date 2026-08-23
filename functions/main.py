@@ -7,43 +7,22 @@ Supports:
 2. Task prioritization and asynchronous ranking lifecycle via Task Queue Functions
 """
 
-from typing import Dict, List, Optional, Union
-import datetime
 import json
 import logging
-import re
 import os
-import jinja2
 
-from firebase_functions import https_fn, tasks_fn, scheduler_fn, firestore_fn, options
 import firebase_admin
-from firebase_admin import credentials, auth
+import jinja2
+from firebase_admin import auth
+from firebase_functions import firestore_fn, https_fn, options, scheduler_fn, tasks_fn
+from flask import Response
 from google.cloud import firestore
 from google.cloud.firestore import SERVER_TIMESTAMP
-from flask import Response
 
 from auth_utils import extract_provider_info, fetch_full_user_auth_record, verify_bearer_token
+from github_sync import get_user_stored_issues, start_user_github_sync, sync_all_users_closed_issues
+from task import enqueue_task_ranking, force_rerank_tasks, get_user_tasks, update_task_priority
 from user import User
-from github_sync import (
-    start_user_github_sync,
-    fetch_single_issue_page,
-    process_and_save_issue_page,
-    fetch_single_comment_page,
-    process_and_save_comment_page,
-    enqueue_issue_page_sync,
-    enqueue_comment_page_sync,
-    get_user_stored_issues,
-    sync_all_users_closed_issues,
-    Issue,
-    GITHUB_API_BASE_URL
-)
-from task import (
-    Task,
-    update_task_priority,
-    force_rerank_tasks,
-    enqueue_task_ranking,
-    get_user_tasks
-)
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -52,8 +31,7 @@ logger = logging.getLogger(__name__)
 # Jinja2 Environment for server-side HTML rendering
 TEMPLATES_DIR = os.path.join(os.path.dirname(__file__), "templates")
 jinja_env = jinja2.Environment(
-    loader=jinja2.FileSystemLoader(TEMPLATES_DIR),
-    autoescape=jinja2.select_autoescape(["html", "xml"])
+    loader=jinja2.FileSystemLoader(TEMPLATES_DIR), autoescape=jinja2.select_autoescape(["html", "xml"])
 )
 
 # Initialize Firebase Admin App if not already initialized
@@ -67,9 +45,8 @@ db: firestore.Client = firestore.Client()
 # Jinja2 Server-Rendered Main Page (Static Ranked Tasks)
 # ============================================================================
 
-@https_fn.on_request(
-    cors=options.CorsOptions(cors_origins="*", cors_methods=["get", "options"])
-)
+
+@https_fn.on_request(cors=options.CorsOptions(cors_origins="*", cors_methods=["get", "options"]))
 def render_main_page(req: https_fn.Request) -> Response:
     """
     Renders the static ranked tasks list for developer debugging using Jinja2 templates.
@@ -78,10 +55,7 @@ def render_main_page(req: https_fn.Request) -> Response:
     if req.method == "OPTIONS":
         return Response("", status=204)
 
-    token_str = (
-        req.cookies.get("__session")
-        or req.args.get("token")
-    )
+    token_str = req.cookies.get("__session") or req.args.get("token")
     if not token_str and req.headers.get("Authorization"):
         auth_hdr = req.headers.get("Authorization", "")
         if auth_hdr.startswith("Bearer "):
@@ -97,11 +71,7 @@ def render_main_page(req: https_fn.Request) -> Response:
     template = jinja_env.get_template("main.html")
 
     if not decoded_token:
-        html = template.render(
-            is_authenticated=False,
-            user=None,
-            tasks=[]
-        )
+        html = template.render(is_authenticated=False, user=None, tasks=[])
         return Response(html, status=200, headers={"Content-Type": "text/html; charset=utf-8"})
 
     uid = str(decoded_token.get("uid") or "")
@@ -109,28 +79,20 @@ def render_main_page(req: https_fn.Request) -> Response:
     user_doc = db.collection("users").document(uid).get()
     user_data = user_doc.to_dict() if user_doc.exists else {}
     if not user_data:
-        user_data = {
-            "uid": uid,
-            "email": decoded_token.get("email"),
-            "display_name": decoded_token.get("name")
-        }
+        user_data = {"uid": uid, "email": decoded_token.get("email"), "display_name": decoded_token.get("name")}
 
     # Fetch tasks from users/{uid}/tasks
     tasks_col = db.collection("users").document(uid).collection("tasks")
     tasks_docs = tasks_col.stream()
-    tasks_list: List[Dict[str, object]] = []
+    tasks_list: list[dict[str, object]] = []
     for doc in tasks_docs:
         t_data = doc.to_dict() or {}
         tasks_list.append(t_data)
 
     # Sort descending from highest to lowest priority
-    tasks_list.sort(key=lambda t: float(t.get("priority") or 0.0), reverse=True) # type: ignore
+    tasks_list.sort(key=lambda t: float(t.get("priority") or 0.0), reverse=True)  # type: ignore
 
-    html = template.render(
-        is_authenticated=True,
-        user=user_data,
-        tasks=tasks_list
-    )
+    html = template.render(is_authenticated=True, user=user_data, tasks=tasks_list)
     return Response(html, status=200, headers={"Content-Type": "text/html; charset=utf-8"})
 
 
@@ -138,9 +100,8 @@ def render_main_page(req: https_fn.Request) -> Response:
 # Jinja2 Server-Rendered Settings Page (Simple CRUD)
 # ============================================================================
 
-@https_fn.on_request(
-    cors=options.CorsOptions(cors_origins="*", cors_methods=["get", "post", "options"])
-)
+
+@https_fn.on_request(cors=options.CorsOptions(cors_origins="*", cors_methods=["get", "post", "options"]))
 def render_settings_page(req: https_fn.Request) -> Response:
     """
     Simple server-side CRUD settings page for configuring GitHub access token and monitored repos.
@@ -150,10 +111,7 @@ def render_settings_page(req: https_fn.Request) -> Response:
     if req.method == "OPTIONS":
         return Response("", status=204)
 
-    token_str = (
-        req.cookies.get("__session")
-        or req.args.get("token")
-    )
+    token_str = req.cookies.get("__session") or req.args.get("token")
     if not token_str and req.headers.get("Authorization"):
         auth_hdr = req.headers.get("Authorization", "")
         if auth_hdr.startswith("Bearer "):
@@ -168,11 +126,7 @@ def render_settings_page(req: https_fn.Request) -> Response:
 
     if not decoded_token:
         # Redirect unauthenticated users to / for login
-        return Response(
-            "",
-            status=302,
-            headers={"Location": "/"}
-        )
+        return Response("", status=302, headers={"Location": "/"})
 
     uid = str(decoded_token.get("uid") or "")
     user_ref = db.collection("users").document(uid)
@@ -184,7 +138,7 @@ def render_settings_page(req: https_fn.Request) -> Response:
         raw_repos = (req.form.get("monitored_repos") or "").strip()
         repo_list = [r.strip() for r in raw_repos.split(",") if r.strip()]
 
-        update_data: Dict[str, object] = {
+        update_data: dict[str, object] = {
             "github_access_token": new_token if new_token else None,
             "gemini_api_key": new_gemini_key if new_gemini_key else None,
             "monitored_repos": repo_list,
@@ -196,24 +150,18 @@ def render_settings_page(req: https_fn.Request) -> Response:
         doc_snap = user_ref.get()
         user_data = doc_snap.to_dict() if doc_snap.exists else {"uid": uid}
 
-        html = template.render(
-            user=user_data,
-            saved=True
-        )
+        html = template.render(user=user_data, saved=True)
         return Response(html, status=200, headers={"Content-Type": "text/html; charset=utf-8"})
 
     # GET request: render form with current values
     doc_snap = user_ref.get()
-    user_data = doc_snap.to_dict() if doc_snap.exists else {
-        "uid": uid,
-        "email": decoded_token.get("email"),
-        "display_name": decoded_token.get("name")
-    }
-
-    html = template.render(
-        user=user_data,
-        saved=False
+    user_data = (
+        doc_snap.to_dict()
+        if doc_snap.exists
+        else {"uid": uid, "email": decoded_token.get("email"), "display_name": decoded_token.get("name")}
     )
+
+    html = template.render(user=user_data, saved=False)
     return Response(html, status=200, headers={"Content-Type": "text/html; charset=utf-8"})
 
 
@@ -221,10 +169,9 @@ def render_settings_page(req: https_fn.Request) -> Response:
 # User Profile Callable Functions
 # ============================================================================
 
-@https_fn.on_call(
-    cors=options.CorsOptions(cors_origins="*", cors_methods=["get", "post", "options"])
-)
-def associate_user_info(req: https_fn.CallableRequest) -> Dict[str, object]:
+
+@https_fn.on_call(cors=options.CorsOptions(cors_origins="*", cors_methods=["get", "post", "options"]))
+def associate_user_info(req: https_fn.CallableRequest) -> dict[str, object]:
     """
     Associates custom information with the authenticated user in Firestore using the User model.
     Accepts:
@@ -237,7 +184,7 @@ def associate_user_info(req: https_fn.CallableRequest) -> Dict[str, object]:
     if not req.auth:
         raise https_fn.HttpsError(
             code=https_fn.FunctionsErrorCode.UNAUTHENTICATED,
-            message="User must be authenticated to associate information."
+            message="User must be authenticated to associate information.",
         )
 
     uid = req.auth.uid
@@ -245,7 +192,7 @@ def associate_user_info(req: https_fn.CallableRequest) -> Dict[str, object]:
     provider_info = extract_provider_info(token)
 
     # Payload provided by caller
-    payload: Dict[str, object] = req.data if isinstance(req.data, dict) else {}
+    payload: dict[str, object] = req.data if isinstance(req.data, dict) else {}
 
     # Extract user-specific fields
     raw_token = payload.get("github_access_token")
@@ -330,17 +277,15 @@ def associate_user_info(req: https_fn.CallableRequest) -> Dict[str, object]:
     }
 
 
-@https_fn.on_call(
-    cors=options.CorsOptions(cors_origins="*", cors_methods=["get", "post", "options"])
-)
-def get_user_info(req: https_fn.CallableRequest) -> Dict[str, object]:
+@https_fn.on_call(cors=options.CorsOptions(cors_origins="*", cors_methods=["get", "post", "options"]))
+def get_user_info(req: https_fn.CallableRequest) -> dict[str, object]:
     """
     Retrieves the authenticated user's User document from Firestore.
     """
     if not req.auth or not req.auth.uid:
         raise https_fn.HttpsError(
             code=https_fn.FunctionsErrorCode.UNAUTHENTICATED,
-            message="User must be authenticated to retrieve information."
+            message="User must be authenticated to retrieve information.",
         )
 
     uid = str(req.auth.uid)
@@ -367,17 +312,14 @@ def get_user_info(req: https_fn.CallableRequest) -> Dict[str, object]:
     }
 
 
-@https_fn.on_call(
-    cors=options.CorsOptions(cors_origins="*", cors_methods=["get", "post", "options"])
-)
-def sync_auth_profile(req: https_fn.CallableRequest) -> Dict[str, object]:
+@https_fn.on_call(cors=options.CorsOptions(cors_origins="*", cors_methods=["get", "post", "options"]))
+def sync_auth_profile(req: https_fn.CallableRequest) -> dict[str, object]:
     """
     Synchronizes Firebase Auth profile data into Firestore.
     """
     if not req.auth or not req.auth.uid:
         raise https_fn.HttpsError(
-            code=https_fn.FunctionsErrorCode.UNAUTHENTICATED,
-            message="User must be authenticated to sync profile."
+            code=https_fn.FunctionsErrorCode.UNAUTHENTICATED, message="User must be authenticated to sync profile."
         )
 
     uid = str(req.auth.uid)
@@ -414,17 +356,15 @@ def sync_auth_profile(req: https_fn.CallableRequest) -> Dict[str, object]:
     }
 
 
-@https_fn.on_call(
-    cors=options.CorsOptions(cors_origins="*", cors_methods=["get", "post", "options"])
-)
-def delete_user_info(req: https_fn.CallableRequest) -> Dict[str, object]:
+@https_fn.on_call(cors=options.CorsOptions(cors_origins="*", cors_methods=["get", "post", "options"]))
+def delete_user_info(req: https_fn.CallableRequest) -> dict[str, object]:
     """
     Deletes the user's User document from Firestore.
     """
     if not req.auth:
         raise https_fn.HttpsError(
             code=https_fn.FunctionsErrorCode.UNAUTHENTICATED,
-            message="User must be authenticated to delete associated data."
+            message="User must be authenticated to delete associated data.",
         )
 
     uid = req.auth.uid
@@ -443,10 +383,9 @@ def delete_user_info(req: https_fn.CallableRequest) -> Dict[str, object]:
 # GitHub Issues Trigger & Retrieval
 # ============================================================================
 
-@https_fn.on_call(
-    cors=options.CorsOptions(cors_origins="*", cors_methods=["get", "post", "options"])
-)
-def sync_github_issues(req: https_fn.CallableRequest) -> Dict[str, object]:
+
+@https_fn.on_call(cors=options.CorsOptions(cors_origins="*", cors_methods=["get", "post", "options"]))
+def sync_github_issues(req: https_fn.CallableRequest) -> dict[str, object]:
     """
     Kicks off asynchronous GitHub issue synchronization in the background.
     Dispatches initial pagination tasks for assigned, mentioned, created, and monitored repo issues.
@@ -454,7 +393,7 @@ def sync_github_issues(req: https_fn.CallableRequest) -> Dict[str, object]:
     if not req.auth:
         raise https_fn.HttpsError(
             code=https_fn.FunctionsErrorCode.UNAUTHENTICATED,
-            message="User must be authenticated to sync GitHub issues."
+            message="User must be authenticated to sync GitHub issues.",
         )
 
     uid = req.auth.uid
@@ -464,7 +403,7 @@ def sync_github_issues(req: https_fn.CallableRequest) -> Dict[str, object]:
     if not doc_snap.exists:
         raise https_fn.HttpsError(
             code=https_fn.FunctionsErrorCode.NOT_FOUND,
-            message="User document not found in Firestore. Please configure your GitHub access token first."
+            message="User document not found in Firestore. Please configure your GitHub access token first.",
         )
 
     raw_user_dict = doc_snap.to_dict() or {}
@@ -473,10 +412,10 @@ def sync_github_issues(req: https_fn.CallableRequest) -> Dict[str, object]:
     if not user.github_access_token:
         raise https_fn.HttpsError(
             code=https_fn.FunctionsErrorCode.FAILED_PRECONDITION,
-            message="User does not have a github_access_token configured."
+            message="User does not have a github_access_token configured.",
         )
 
-    payload: Dict[str, object] = req.data if isinstance(req.data, dict) else {}
+    payload: dict[str, object] = req.data if isinstance(req.data, dict) else {}
     raw_state = payload.get("state")
     state = str(raw_state) if raw_state is not None else "open"
 
@@ -486,26 +425,22 @@ def sync_github_issues(req: https_fn.CallableRequest) -> Dict[str, object]:
     except Exception as e:
         logger.error(f"Error starting GitHub sync for UID {uid}: {e}")
         raise https_fn.HttpsError(
-            code=https_fn.FunctionsErrorCode.INTERNAL,
-            message=f"Failed to start GitHub sync: {str(e)}"
-        )
+            code=https_fn.FunctionsErrorCode.INTERNAL, message=f"Failed to start GitHub sync: {e!s}"
+        ) from e
 
 
-@https_fn.on_call(
-    cors=options.CorsOptions(cors_origins="*", cors_methods=["get", "post", "options"])
-)
-def get_stored_issues(req: https_fn.CallableRequest) -> Dict[str, object]:
+@https_fn.on_call(cors=options.CorsOptions(cors_origins="*", cors_methods=["get", "post", "options"]))
+def get_stored_issues(req: https_fn.CallableRequest) -> dict[str, object]:
     """
     Retrieves stored issues for the authenticated user from Firestore under users/{uid}/issues.
     """
     if not req.auth or not req.auth.uid:
         raise https_fn.HttpsError(
-            code=https_fn.FunctionsErrorCode.UNAUTHENTICATED,
-            message="User must be authenticated to retrieve issues."
+            code=https_fn.FunctionsErrorCode.UNAUTHENTICATED, message="User must be authenticated to retrieve issues."
         )
 
     uid = str(req.auth.uid)
-    payload: Dict[str, object] = req.data if isinstance(req.data, dict) else {}
+    payload: dict[str, object] = req.data if isinstance(req.data, dict) else {}
     raw_lim = payload.get("limit", 100)
     limit = int(raw_lim) if isinstance(raw_lim, (int, str)) and str(raw_lim).isdigit() else 100
 
@@ -521,30 +456,23 @@ def get_stored_issues(req: https_fn.CallableRequest) -> Dict[str, object]:
 # Firebase Task Queue Functions: Chained Issue & Comment Pagination
 # ============================================================================
 
+
 @tasks_fn.on_task_dispatched(
-    retry_config=options.RetryConfig(
-        max_attempts=3,
-        min_backoff_seconds=10,
-        max_backoff_seconds=300,
-        max_doublings=3
-    ),
-    rate_limits=options.RateLimits(
-        max_concurrent_dispatches=10,
-        max_dispatches_per_second=10
-    )
+    retry_config=options.RetryConfig(max_attempts=3, min_backoff_seconds=10, max_backoff_seconds=300, max_doublings=3),
+    rate_limits=options.RateLimits(max_concurrent_dispatches=10, max_dispatches_per_second=10),
 )
-def sync_github_issues_page(req: tasks_fn.CallableRequest) -> Dict[str, object]:
+def sync_github_issues_page(req: tasks_fn.CallableRequest) -> dict[str, object]:
     """
     Processes one page of GitHub issues for a given user, stores them in Firestore,
     enqueues comment fetching for each issue, and chains to the next page if available.
     """
-    data: Dict[str, object] = req.data if isinstance(req.data, dict) else {}
+    data: dict[str, object] = req.data if isinstance(req.data, dict) else {}
     raw_uid = data.get("uid")
     uid = str(raw_uid) if raw_uid is not None else None
     raw_url = data.get("url")
     url = str(raw_url) if raw_url is not None else None
     raw_params = data.get("params")
-    params: Optional[Dict[str, object]] = raw_params if isinstance(raw_params, dict) else None
+    params: dict[str, object] | None = raw_params if isinstance(raw_params, dict) else None
     raw_reason = data.get("reason", "assigned")
     reason = str(raw_reason)
     raw_owner = data.get("owner_fallback")
@@ -554,11 +482,11 @@ def sync_github_issues_page(req: tasks_fn.CallableRequest) -> Dict[str, object]:
 
     if not uid or not url:
         raise tasks_fn.HttpsError(
-            code=tasks_fn.FunctionsErrorCode.INVALID_ARGUMENT,
-            message="Missing 'uid' or 'url' in task data."
+            code=tasks_fn.FunctionsErrorCode.INVALID_ARGUMENT, message="Missing 'uid' or 'url' in task data."
         )
 
     from github_sync import execute_issue_page_sync
+
     return execute_issue_page_sync(
         uid=uid,
         url=url,
@@ -566,28 +494,20 @@ def sync_github_issues_page(req: tasks_fn.CallableRequest) -> Dict[str, object]:
         reason=reason,
         owner_fallback=owner_fallback,
         repo_fallback=repo_fallback,
-        db=db
+        db=db,
     )
 
 
 @tasks_fn.on_task_dispatched(
-    retry_config=options.RetryConfig(
-        max_attempts=3,
-        min_backoff_seconds=10,
-        max_backoff_seconds=300,
-        max_doublings=3
-    ),
-    rate_limits=options.RateLimits(
-        max_concurrent_dispatches=15,
-        max_dispatches_per_second=15
-    )
+    retry_config=options.RetryConfig(max_attempts=3, min_backoff_seconds=10, max_backoff_seconds=300, max_doublings=3),
+    rate_limits=options.RateLimits(max_concurrent_dispatches=15, max_dispatches_per_second=15),
 )
-def sync_issue_comments_page(req: tasks_fn.CallableRequest) -> Dict[str, object]:
+def sync_issue_comments_page(req: tasks_fn.CallableRequest) -> dict[str, object]:
     """
     Processes one page of comments for an issue, updates Firestore,
     and chains to the next page of comments if available.
     """
-    data: Dict[str, object] = req.data if isinstance(req.data, dict) else {}
+    data: dict[str, object] = req.data if isinstance(req.data, dict) else {}
     raw_uid = data.get("uid")
     uid = str(raw_uid) if raw_uid is not None else None
     raw_doc = data.get("issue_doc_id")
@@ -595,21 +515,17 @@ def sync_issue_comments_page(req: tasks_fn.CallableRequest) -> Dict[str, object]
     raw_url = data.get("comments_url")
     comments_url = str(raw_url) if raw_url is not None else None
     raw_params = data.get("params")
-    params: Optional[Dict[str, object]] = raw_params if isinstance(raw_params, dict) else None
+    params: dict[str, object] | None = raw_params if isinstance(raw_params, dict) else None
 
     if not uid or not issue_doc_id or not comments_url:
         raise tasks_fn.HttpsError(
-            code=tasks_fn.FunctionsErrorCode.INVALID_ARGUMENT,
-            message="Missing required parameters for comment sync."
+            code=tasks_fn.FunctionsErrorCode.INVALID_ARGUMENT, message="Missing required parameters for comment sync."
         )
 
     from github_sync import execute_comment_page_sync
+
     return execute_comment_page_sync(
-        uid=uid,
-        issue_doc_id=issue_doc_id,
-        comments_url=comments_url,
-        params=params if params else None,
-        db=db
+        uid=uid, issue_doc_id=issue_doc_id, comments_url=comments_url, params=params if params else None, db=db
     )
 
 
@@ -617,32 +533,24 @@ def sync_issue_comments_page(req: tasks_fn.CallableRequest) -> Dict[str, object]
 # Firebase Task Queue Functions: Task Ranking
 # ============================================================================
 
+
 @tasks_fn.on_task_dispatched(
-    retry_config=options.RetryConfig(
-        max_attempts=3,
-        min_backoff_seconds=10,
-        max_backoff_seconds=300,
-        max_doublings=3
-    ),
-    rate_limits=options.RateLimits(
-        max_concurrent_dispatches=5,
-        max_dispatches_per_second=10
-    )
+    retry_config=options.RetryConfig(max_attempts=3, min_backoff_seconds=10, max_backoff_seconds=300, max_doublings=3),
+    rate_limits=options.RateLimits(max_concurrent_dispatches=5, max_dispatches_per_second=10),
 )
-def rank_user_tasks(req: tasks_fn.CallableRequest) -> Dict[str, object]:
+def rank_user_tasks(req: tasks_fn.CallableRequest) -> dict[str, object]:
     """
     Firebase Task Queue function for asynchronous ranking of a single task.
     Dispatched via Cloud Tasks when a task's priority needs update.
     """
-    data: Dict[str, object] = req.data if isinstance(req.data, dict) else {}
+    data: dict[str, object] = req.data if isinstance(req.data, dict) else {}
     raw_uid = data.get("uid")
     uid = str(raw_uid) if raw_uid is not None else None
     raw_tid = data.get("task_id")
     task_id = str(raw_tid) if raw_tid is not None else None
     if not uid or not task_id:
         raise tasks_fn.HttpsError(
-            code=tasks_fn.FunctionsErrorCode.INVALID_ARGUMENT,
-            message="Missing 'uid' or 'task_id' in task payload."
+            code=tasks_fn.FunctionsErrorCode.INVALID_ARGUMENT, message="Missing 'uid' or 'task_id' in task payload."
         )
 
     logger.info(f"Executing asynchronous ranking for task {task_id} (UID {uid}) in Task Queue worker.")
@@ -654,10 +562,9 @@ def rank_user_tasks(req: tasks_fn.CallableRequest) -> Dict[str, object]:
 # Task & Priority Ranking Callable Functions
 # ============================================================================
 
-@https_fn.on_call(
-    cors=options.CorsOptions(cors_origins="*", cors_methods=["get", "post", "options"])
-)
-def force_rerank_all_tasks(req: https_fn.CallableRequest) -> Dict[str, object]:
+
+@https_fn.on_call(cors=options.CorsOptions(cors_origins="*", cors_methods=["get", "post", "options"]))
+def force_rerank_all_tasks(req: https_fn.CallableRequest) -> dict[str, object]:
     """
     Forces all tasks for the authenticated user to be reranked:
     Sets priority_needs_updated = True on all tasks and enqueues the ranker.
@@ -665,7 +572,7 @@ def force_rerank_all_tasks(req: https_fn.CallableRequest) -> Dict[str, object]:
     if not req.auth or not req.auth.uid:
         raise https_fn.HttpsError(
             code=https_fn.FunctionsErrorCode.UNAUTHENTICATED,
-            message="User must be authenticated to force rerank tasks."
+            message="User must be authenticated to force rerank tasks.",
         )
 
     uid = str(req.auth.uid)
@@ -675,26 +582,22 @@ def force_rerank_all_tasks(req: https_fn.CallableRequest) -> Dict[str, object]:
     except Exception as e:
         logger.error(f"Error forcing task rerank for UID {uid}: {e}")
         raise https_fn.HttpsError(
-            code=https_fn.FunctionsErrorCode.INTERNAL,
-            message=f"Failed to force rerank tasks: {str(e)}"
-        )
+            code=https_fn.FunctionsErrorCode.INTERNAL, message=f"Failed to force rerank tasks: {e!s}"
+        ) from e
 
 
-@https_fn.on_call(
-    cors=options.CorsOptions(cors_origins="*", cors_methods=["get", "post", "options"])
-)
-def get_user_task_list(req: https_fn.CallableRequest) -> Dict[str, object]:
+@https_fn.on_call(cors=options.CorsOptions(cors_origins="*", cors_methods=["get", "post", "options"]))
+def get_user_task_list(req: https_fn.CallableRequest) -> dict[str, object]:
     """
     Retrieves all tasks for the authenticated user from Firestore under users/{uid}/tasks.
     """
     if not req.auth or not req.auth.uid:
         raise https_fn.HttpsError(
-            code=https_fn.FunctionsErrorCode.UNAUTHENTICATED,
-            message="User must be authenticated to retrieve tasks."
+            code=https_fn.FunctionsErrorCode.UNAUTHENTICATED, message="User must be authenticated to retrieve tasks."
         )
 
     uid = str(req.auth.uid)
-    payload: Dict[str, object] = req.data if isinstance(req.data, dict) else {}
+    payload: dict[str, object] = req.data if isinstance(req.data, dict) else {}
     raw_lim = payload.get("limit", 100)
     limit = int(raw_lim) if isinstance(raw_lim, (int, str)) and str(raw_lim).isdigit() else 100
 
@@ -710,9 +613,8 @@ def get_user_task_list(req: https_fn.CallableRequest) -> Dict[str, object]:
 # HTTP REST API Function
 # ============================================================================
 
-@https_fn.on_request(
-    cors=options.CorsOptions(cors_origins="*", cors_methods=["get", "post", "delete", "options"])
-)
+
+@https_fn.on_request(cors=options.CorsOptions(cors_origins="*", cors_methods=["get", "post", "delete", "options"]))
 def user_api(req: https_fn.Request) -> Response:
     """
     RESTful endpoint:
@@ -728,11 +630,7 @@ def user_api(req: https_fn.Request) -> Response:
     try:
         decoded_token = verify_bearer_token(auth_header)
     except https_fn.HttpsError as e:
-        return Response(
-            json.dumps({"error": e.message}),
-            status=401,
-            headers={"Content-Type": "application/json"}
-        )
+        return Response(json.dumps({"error": e.message}), status=401, headers={"Content-Type": "application/json"})
 
     uid = str(decoded_token.get("uid") or "")
     provider_info = extract_provider_info(decoded_token)
@@ -747,19 +645,22 @@ def user_api(req: https_fn.Request) -> Response:
             user = User.from_auth_token(decoded_token, provider_info)
 
         return Response(
-            json.dumps({
-                "status": "success",
-                "uid": uid,
-                "provider": provider_info.get("primary_provider_name"),
-                "user": user.model_dump(mode="json")
-            }, default=str),
+            json.dumps(
+                {
+                    "status": "success",
+                    "uid": uid,
+                    "provider": provider_info.get("primary_provider_name"),
+                    "user": user.model_dump(mode="json"),
+                },
+                default=str,
+            ),
             status=200,
-            headers={"Content-Type": "application/json"}
+            headers={"Content-Type": "application/json"},
         )
 
     elif req.method == "POST":
         try:
-            body: Dict[str, object] = req.get_json(silent=True) or {}
+            body: dict[str, object] = req.get_json(silent=True) or {}
         except Exception:
             body = {}
 
@@ -771,9 +672,15 @@ def user_api(req: https_fn.Request) -> Response:
             user = User.from_auth_token(decoded_token, provider_info)
 
         if "github_access_token" in body:
-            user.github_access_token = str(body["github_access_token"]) if body["github_access_token"] is not None else None
+            user.github_access_token = (
+                str(body["github_access_token"]) if body["github_access_token"] is not None else None
+            )
         if "last_assigned_issue_update_time" in body:
-            user.last_assigned_issue_update_time = str(body["last_assigned_issue_update_time"]) if body["last_assigned_issue_update_time"] is not None else None
+            user.last_assigned_issue_update_time = (
+                str(body["last_assigned_issue_update_time"])
+                if body["last_assigned_issue_update_time"] is not None
+                else None
+            )
         if "monitored_repos" in body:
             raw_mr = body.get("monitored_repos")
             if isinstance(raw_mr, list):
@@ -789,30 +696,29 @@ def user_api(req: https_fn.Request) -> Response:
 
         user_ref.set({**user.model_dump(), "updated_at": SERVER_TIMESTAMP}, merge=True)
         return Response(
-            json.dumps({
-                "status": "success",
-                "message": "User data updated successfully.",
-                "user": user.model_dump(mode="json")
-            }),
+            json.dumps(
+                {
+                    "status": "success",
+                    "message": "User data updated successfully.",
+                    "user": user.model_dump(mode="json"),
+                }
+            ),
             status=200,
-            headers={"Content-Type": "application/json"}
+            headers={"Content-Type": "application/json"},
         )
 
     elif req.method == "DELETE":
         user_ref.delete()
         return Response(
-            json.dumps({
-                "status": "success",
-                "message": f"User document for UID {uid} deleted."
-            }),
+            json.dumps({"status": "success", "message": f"User document for UID {uid} deleted."}),
             status=200,
-            headers={"Content-Type": "application/json"}
+            headers={"Content-Type": "application/json"},
         )
 
     return Response(
         json.dumps({"error": f"Method {req.method} not allowed."}),
         status=405,
-        headers={"Content-Type": "application/json"}
+        headers={"Content-Type": "application/json"},
     )
 
 
@@ -820,10 +726,8 @@ def user_api(req: https_fn.Request) -> Response:
 # Scheduled Functions: Closed Issues Sync & Task Cleanup (Option A)
 # ============================================================================
 
-@scheduler_fn.on_schedule(
-    schedule="every 5 minutes",
-    retry_count=1
-)
+
+@scheduler_fn.on_schedule(schedule="every 5 minutes", retry_count=1)
 def scheduled_sync_closed_issues(event: scheduler_fn.ScheduledEvent) -> None:
     """
     Scheduled function that runs every 5 minutes to detect closed GitHub issues
@@ -838,9 +742,10 @@ def scheduled_sync_closed_issues(event: scheduler_fn.ScheduledEvent) -> None:
 # Cloud Firestore Triggers: Auto-Sync on User Settings Creation or Change
 # ============================================================================
 
+
 @firestore_fn.on_document_written(document="users/{uid}")
 def on_user_settings_changed(
-    event: firestore_fn.Event[firestore_fn.Change[firestore_fn.DocumentSnapshot | None]]
+    event: firestore_fn.Event[firestore_fn.Change[firestore_fn.DocumentSnapshot | None]],
 ) -> None:
     """
     Cloud Firestore trigger that invokes start_user_github_sync if the user's
@@ -893,10 +798,9 @@ def on_user_settings_changed(
 # Cloud Firestore Triggers: Task Document Changes & Reranking
 # ============================================================================
 
+
 @firestore_fn.on_document_written(document="users/{uid}/tasks/{task_id}")
-def on_task_written(
-    event: firestore_fn.Event[firestore_fn.Change[firestore_fn.DocumentSnapshot | None]]
-) -> None:
+def on_task_written(event: firestore_fn.Event[firestore_fn.Change[firestore_fn.DocumentSnapshot | None]]) -> None:
     """
     Cloud Firestore trigger that monitors for changes to Task documents and triggers reranking
     whenever a task is newly created or updated with priority_needs_updated == True.
@@ -906,7 +810,9 @@ def on_task_written(
     logger.info(f"[TRIGGER:on_task_written] Fired for users/{uid}/tasks/{task_id}")
 
     if event.data is None or event.data.after is None:
-        logger.info(f"[TRIGGER:on_task_written] Task document was deleted for users/{uid}/tasks/{task_id}; skipping rerank trigger.")
+        logger.info(
+            f"[TRIGGER:on_task_written] Task document was deleted for users/{uid}/tasks/{task_id}; skipping rerank trigger."
+        )
         return
 
     after_snap = event.data.after
@@ -914,7 +820,9 @@ def on_task_written(
 
     # If document does not exist after write, do nothing
     if not after_snap.exists:
-        logger.info(f"[TRIGGER:on_task_written] Task document does not exist after write for users/{uid}/tasks/{task_id}; skipping.")
+        logger.info(
+            f"[TRIGGER:on_task_written] Task document does not exist after write for users/{uid}/tasks/{task_id}; skipping."
+        )
         return
 
     after_data = after_snap.to_dict() or {}
@@ -936,16 +844,11 @@ def on_task_written(
 
     # Only trigger reranking if priority_needs_updated is True (prevents loop when ranker sets it to False)
     if not after_needs_update:
-        logger.info(f"[TRIGGER:on_task_written] after_needs_update is False for users/{uid}/tasks/{task_id}; skipping rerank.")
+        logger.info(
+            f"[TRIGGER:on_task_written] after_needs_update is False for users/{uid}/tasks/{task_id}; skipping rerank."
+        )
         return
 
     if uid and task_id:
-        logger.info(
-            f"[TRIGGER:on_task_written] Enqueuing ranking for UID {uid}, task {task_id}."
-        )
+        logger.info(f"[TRIGGER:on_task_written] Enqueuing ranking for UID {uid}, task {task_id}.")
         enqueue_task_ranking(uid=str(uid), task_id=str(task_id), function_name="rank_user_tasks", db=db)
-
-
-
-
-

@@ -5,16 +5,15 @@ and dispatches asynchronous ranking tasks using Firebase Task Queue Functions (f
 See: https://firebase.google.com/docs/functions/task-functions#python
 """
 
-from datetime import datetime, timezone
-import json
-import os
-import threading
-from typing import Dict, List, Optional, Union
 import logging
-from pydantic import BaseModel, Field, ConfigDict, field_serializer
-from google.cloud import firestore
-import firebase_admin
+import threading
+from datetime import datetime
+
 from firebase_admin import functions as admin_functions
+from google.cloud import firestore
+from pydantic import BaseModel, ConfigDict, field_serializer
+
+from genai_ranker import run_ranker
 
 logger = logging.getLogger(__name__)
 
@@ -23,21 +22,24 @@ class Task(BaseModel):
     """
     Represents a task associated with an authenticated user and a specific GitHub issue.
     """
+
     model_config = ConfigDict(arbitrary_types_allowed=True)
 
     priority: float = 0.0  # A priority value between 0.0 and 1.0
     priority_needs_updated: bool = True
-    github_issue_ref: Optional[Union[firestore.DocumentReference, str, object]] = None  # Native Firestore DocumentReference, test mock, or resource path
-    github_issue_id: Optional[str] = None  # Direct string key (e.g. owner_repo_number)
-    uid: Optional[str] = None  # Owner user ID
-    id: Optional[str] = None  # Task document ID (e.g. task_{github_issue_id})
-    github_issue_title: Optional[str] = None  # Optional cached title copied from GitHub issue
-    github_issue_url: Optional[str] = None  # Optional direct URL copied from GitHub issue
-    created_at: Optional[Union[datetime, str, object]] = None
-    updated_at: Optional[Union[datetime, str, object]] = None
+    github_issue_ref: firestore.DocumentReference | str | object | None = (
+        None  # Native Firestore DocumentReference, test mock, or resource path
+    )
+    github_issue_id: str | None = None  # Direct string key (e.g. owner_repo_number)
+    uid: str | None = None  # Owner user ID
+    id: str | None = None  # Task document ID (e.g. task_{github_issue_id})
+    github_issue_title: str | None = None  # Optional cached title copied from GitHub issue
+    github_issue_url: str | None = None  # Optional direct URL copied from GitHub issue
+    created_at: datetime | str | object | None = None
+    updated_at: datetime | str | object | None = None
 
     @field_serializer("github_issue_ref", when_used="json")
-    def serialize_issue_ref(self, v: Optional[Union[firestore.DocumentReference, str, object]]) -> Optional[str]:
+    def serialize_issue_ref(self, v: firestore.DocumentReference | str | object | None) -> str | None:
         if v is None:
             return None
         if isinstance(v, str):
@@ -50,7 +52,7 @@ class Task(BaseModel):
         return str(v)
 
     @field_serializer("created_at", "updated_at", when_used="json")
-    def serialize_timestamps(self, v: Optional[Union[datetime, str, object]]) -> Optional[str]:
+    def serialize_timestamps(self, v: datetime | str | object | None) -> str | None:
         if v is None:
             return None
         if isinstance(v, datetime):
@@ -67,25 +69,19 @@ class Task(BaseModel):
         return "task_unknown"
 
 
-from genai_ranker import (
-    TaskPriorityOutput,
-    get_pydantic_ai_agent,
-    run_ranker,
-)
-
-
 # ============================================================================
 # Asynchronous Task Enqueuing via Firebase Admin SDK
 # (https://firebase.google.com/docs/functions/task-functions#python)
 # ============================================================================
 
+
 def enqueue_task_ranking(
     uid: str,
     task_id: str,
     function_name: str = "rank_user_tasks",
-    db: Optional[firestore.Client] = None,
-    opts: Optional[admin_functions.TaskOptions] = None
-) -> Dict[str, object]:
+    db: firestore.Client | None = None,
+    opts: admin_functions.TaskOptions | None = None,
+) -> dict[str, object]:
     """
     Enqueues a task to the Firebase Task Queue function using the official Firebase Admin SDK.
     Dispatches a payload with the user UID and task document ID.
@@ -95,7 +91,9 @@ def enqueue_task_ranking(
         queue = admin_functions.task_queue(function_name)
         task_opts = opts or admin_functions.TaskOptions(dispatch_deadline_seconds=300)
         enqueued_id = queue.enqueue({"uid": uid, "task_id": task_id}, opts=task_opts)
-        logger.info(f"Enqueued Firebase task '{enqueued_id}' in queue '{function_name}' for task '{task_id}' (UID {uid})")
+        logger.info(
+            f"Enqueued Firebase task '{enqueued_id}' in queue '{function_name}' for task '{task_id}' (UID {uid})"
+        )
         return {
             "status": "enqueued",
             "task_id": enqueued_id,
@@ -108,6 +106,7 @@ def enqueue_task_ranking(
         # In local emulator or unauthenticated testing environments without Cloud Tasks credentials,
         # dispatch asynchronously via thread if db client is provided
         if db is not None:
+
             def async_worker():
                 try:
                     update_task_priority(uid=uid, task_id=task_id, db=db)
@@ -129,12 +128,8 @@ def enqueue_task_ranking(
 # Task Management & Firestore Operations
 # ============================================================================
 
-def ensure_task_for_issue(
-    uid: str,
-    issue_id: str,
-    issue_data: Dict[str, object],
-    db: firestore.Client
-) -> Task:
+
+def ensure_task_for_issue(uid: str, issue_id: str, issue_data: dict[str, object], db: firestore.Client) -> Task:
     """
     Creates or updates the Task associated with a given issue in Firestore.
     When an issue is modified or created, priority_needs_updated is set to True.
@@ -178,7 +173,7 @@ def ensure_task_for_issue(
     return task
 
 
-def update_task_priority(uid: str, task_id: str, db: firestore.Client) -> Dict[str, object]:
+def update_task_priority(uid: str, task_id: str, db: firestore.Client) -> dict[str, object]:
     """
     Retrieves a single task from Firestore for a given user, loads its associated
     GitHub issue (including comments) and the user's github_username, calls the
@@ -201,7 +196,7 @@ def update_task_priority(uid: str, task_id: str, db: firestore.Client) -> Dict[s
 
     # Fetch associated issue and comments from users/{uid}/issues/{issue_id}
     issue_id = task.github_issue_id or (task_id[5:] if task_id.startswith("task_") else task_id)
-    issue_data: Dict[str, object] = {}
+    issue_data: dict[str, object] = {}
     if issue_id:
         issue_ref = db.collection("users").document(uid).collection("issues").document(issue_id)
         issue_snap = issue_ref.get()
@@ -216,8 +211,8 @@ def update_task_priority(uid: str, task_id: str, db: firestore.Client) -> Dict[s
     # Fetch user profile to get github_username and gemini_api_key
     user_ref = db.collection("users").document(uid)
     user_snap = user_ref.get()
-    github_username: Optional[str] = None
-    gemini_api_key: Optional[str] = None
+    github_username: str | None = None
+    gemini_api_key: str | None = None
     if user_snap.exists:
         u_dict = user_snap.to_dict() or {}
         raw_u_name = u_dict.get("github_username")
@@ -232,10 +227,7 @@ def update_task_priority(uid: str, task_id: str, db: firestore.Client) -> Dict[s
         logger.warning(f"[UPDATE_TASK_PRIORITY] User profile document users/{uid} does not exist.")
 
     ranked_task = run_ranker(
-        task=task,
-        issue=issue_data,
-        github_username=github_username,
-        gemini_api_key=gemini_api_key
+        task=task, issue=issue_data, github_username=github_username, gemini_api_key=gemini_api_key
     )
 
     update_payload = {
@@ -246,7 +238,9 @@ def update_task_priority(uid: str, task_id: str, db: firestore.Client) -> Dict[s
     logger.info(f"[UPDATE_TASK_PRIORITY] Writing updated task {task_id} to Firestore with payload: {update_payload}")
     task_ref.set(update_payload, merge=True)
 
-    logger.info(f"[UPDATE_TASK_PRIORITY] Successfully updated priority for task {task_id} for user {uid} -> {ranked_task.priority:.2f}.")
+    logger.info(
+        f"[UPDATE_TASK_PRIORITY] Successfully updated priority for task {task_id} for user {uid} -> {ranked_task.priority:.2f}."
+    )
     return {
         "status": "success",
         "task_id": task_id,
@@ -256,7 +250,7 @@ def update_task_priority(uid: str, task_id: str, db: firestore.Client) -> Dict[s
     }
 
 
-def force_rerank_tasks(uid: str, db: firestore.Client) -> Dict[str, object]:
+def force_rerank_tasks(uid: str, db: firestore.Client) -> dict[str, object]:
     """
     Forces all tasks for the user to be reranked asynchronously:
     Sets priority_needs_updated = True for all tasks in Firestore.
@@ -269,10 +263,14 @@ def force_rerank_tasks(uid: str, db: firestore.Client) -> Dict[str, object]:
     count = 0
 
     for doc_snap in all_docs:
-        batch.set(doc_snap.reference, {
-            "priority_needs_updated": True,
-            "updated_at": firestore.SERVER_TIMESTAMP,
-        }, merge=True)
+        batch.set(
+            doc_snap.reference,
+            {
+                "priority_needs_updated": True,
+                "updated_at": firestore.SERVER_TIMESTAMP,
+            },
+            merge=True,
+        )
         count += 1
 
     if count > 0:
@@ -286,19 +284,19 @@ def force_rerank_tasks(uid: str, db: firestore.Client) -> Dict[str, object]:
     }
 
 
-def get_user_tasks(uid: str, db: firestore.Client, limit: int = 100) -> List[Dict[str, object]]:
+def get_user_tasks(uid: str, db: firestore.Client, limit: int = 100) -> list[dict[str, object]]:
     """
     Retrieves tasks stored in Firestore for a given user UID, sorted by priority (descending).
     """
     tasks_col = db.collection("users").document(uid).collection("tasks")
     docs = tasks_col.limit(limit).stream()
 
-    tasks: List[Dict[str, object]] = []
+    tasks: list[dict[str, object]] = []
     for doc_snap in docs:
         raw_dict = doc_snap.to_dict() or {}
         t = Task.model_validate({**raw_dict, "id": doc_snap.id})
         tasks.append(t.model_dump(mode="json"))
 
     # Sort descending by priority
-    tasks.sort(key=lambda x: float(x.get("priority", 0.0)), reverse=True) # type: ignore
+    tasks.sort(key=lambda x: float(x.get("priority", 0.0)), reverse=True)  # type: ignore
     return tasks
