@@ -104,7 +104,6 @@ def run_ranker(
     github_username: str | None = None,
     gemini_api_key: str | None = None,
     agent: Agent[None, TaskPriorityOutput] | None = None,
-    ai: object | None = None,  # Backwards compatibility alias for mock injection
 ) -> TTask:
     """
     Ranker engine that computes priority for a single task using Pydantic AI

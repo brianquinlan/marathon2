@@ -52,7 +52,7 @@ def _safe_int(val: object, default: int = 0) -> int:
     return default
 
 
-def _parse_github_datetime(dt_val: datetime | str | object | None) -> datetime | None:
+def _parse_github_datetime(dt_val: object) -> datetime | None:
     """Parses ISO 8601 strings or timestamp objects into UTC datetime objects."""
     if not dt_val:
         return None
@@ -366,12 +366,12 @@ def execute_issue_page_sync(
 def enqueue_issue_page_sync(
     uid: str,
     url: str,
+    db: firestore.Client,
     params: Mapping[str, object] | None = None,
     reason: AssociationReason | str = AssociationReason.ASSIGNED,
     owner_fallback: str | None = None,
     repo_fallback: str | None = None,
-    db: firestore.Client | None = None,
-) -> str | None:
+) -> str:
     """
     Enqueues a task to process a page of issues from GitHub using Firebase task_queue.
     Falls back seamlessly to background thread execution if task queue is not available in local environment.
@@ -389,29 +389,27 @@ def enqueue_issue_page_sync(
         }
         task_id = queue.enqueue(task_data, opts=admin_functions.TaskOptions(dispatch_deadline_seconds=300))
         logger.info(f"Enqueued sync_github_issues_page task '{task_id}' for UID {uid}, url={url}")
-        return task_id
+        return str(task_id)
     except Exception as e:
         logger.warning(f"Firebase task_queue.enqueue exception ({e}). Handling fallback dispatch.")
-        if db is not None:
 
-            def _worker():
-                try:
-                    execute_issue_page_sync(
-                        uid=uid,
-                        url=url,
-                        params=params,
-                        reason=reason,
-                        owner_fallback=owner_fallback,
-                        repo_fallback=repo_fallback,
-                        db=db,
-                    )
-                except Exception as inner_e:
-                    logger.error(f"Background thread execution error in execute_issue_page_sync: {inner_e}")
+        def _worker():
+            try:
+                execute_issue_page_sync(
+                    uid=uid,
+                    url=url,
+                    params=params,
+                    reason=reason,
+                    owner_fallback=owner_fallback,
+                    repo_fallback=repo_fallback,
+                    db=db,
+                )
+            except Exception as inner_e:
+                logger.error(f"Background thread execution error in execute_issue_page_sync: {inner_e}")
 
-            t = threading.Thread(target=_worker, daemon=True)
-            t.start()
-            return "thread_dispatched"
-        return None
+        t = threading.Thread(target=_worker, daemon=True)
+        t.start()
+        return "thread_dispatched"
 
 
 def fetch_github_user_login(access_token: str) -> str | None:
