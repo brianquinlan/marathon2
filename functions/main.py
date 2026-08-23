@@ -848,8 +848,12 @@ def on_task_written(
     Cloud Firestore trigger that monitors for changes to Task documents and triggers reranking
     whenever a task is newly created or updated with priority_needs_updated == True.
     """
+    uid = event.params.get("uid")
+    task_id = event.params.get("task_id")
+    logger.info(f"[TRIGGER:on_task_written] Fired for users/{uid}/tasks/{task_id}")
+
     if event.data is None or event.data.after is None:
-        logger.info("Task document was deleted; skipping rerank trigger.")
+        logger.info(f"[TRIGGER:on_task_written] Task document was deleted for users/{uid}/tasks/{task_id}; skipping rerank trigger.")
         return
 
     after_snap = event.data.after
@@ -857,30 +861,35 @@ def on_task_written(
 
     # If document does not exist after write, do nothing
     if hasattr(after_snap, "exists") and not after_snap.exists:
-        logger.info("Task document does not exist after write; skipping.")
+        logger.info(f"[TRIGGER:on_task_written] Task document does not exist after write for users/{uid}/tasks/{task_id}; skipping.")
         return
 
     after_data = after_snap.to_dict() or {}
     after_needs_update = after_data.get("priority_needs_updated", False)
-
-    # Only trigger reranking if priority_needs_updated is True (prevents loop when ranker sets it to False)
-    if not after_needs_update:
-        return
+    after_priority = after_data.get("priority", 0.0)
 
     is_new = (before_snap is None) or (hasattr(before_snap, "exists") and not before_snap.exists)
     before_data = {}
     if not is_new and before_snap is not None:
         before_data = before_snap.to_dict() or {}
     before_needs_update = before_data.get("priority_needs_updated", False)
+    before_priority = before_data.get("priority", 0.0)
 
-    if is_new or (after_needs_update and not before_needs_update) or after_needs_update:
-        uid = event.params.get("uid")
-        task_id = event.params.get("task_id")
-        logger.info(
-            f"Task document changed with priority_needs_updated=True for UID {uid}, task {task_id}. "
-            f"Triggering asynchronous task reranking for single task."
-        )
-        enqueue_task_ranking(uid=uid, task_id=task_id, function_name="rank_user_tasks", db=db)
+    logger.info(
+        f"[TRIGGER:on_task_written] users/{uid}/tasks/{task_id}: is_new={is_new}, "
+        f"before(priority={before_priority}, needs_update={before_needs_update}), "
+        f"after(priority={after_priority}, needs_update={after_needs_update})"
+    )
+
+    # Only trigger reranking if priority_needs_updated is True (prevents loop when ranker sets it to False)
+    if not after_needs_update:
+        logger.info(f"[TRIGGER:on_task_written] after_needs_update is False for users/{uid}/tasks/{task_id}; skipping rerank.")
+        return
+
+    logger.info(
+        f"[TRIGGER:on_task_written] Enqueuing ranking for UID {uid}, task {task_id}."
+    )
+    enqueue_task_ranking(uid=uid, task_id=task_id, function_name="rank_user_tasks", db=db)
 
 
 

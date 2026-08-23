@@ -97,8 +97,8 @@ class TestTaskModel(unittest.TestCase):
 
 class TestRankerEngine(unittest.TestCase):
 
-    def test_run_ranker_with_genkit_model(self):
-        mock_ai = MagicMock()
+    def test_run_ranker_with_pydantic_ai_agent(self):
+        mock_agent = MagicMock()
         mock_output = TaskPriorityOutput(
             priority=0.92,
             reasoning="Current user @brian is explicitly mentioned in comments asking for a blocker fix."
@@ -106,15 +106,13 @@ class TestRankerEngine(unittest.TestCase):
         mock_res = MagicMock()
         mock_res.output = mock_output
 
-        async def fake_generate(**kwargs):
-            self.assertEqual(kwargs.get("model"), "googleai/gemini-flash-latest")
-            self.assertEqual(kwargs.get("output_schema"), TaskPriorityOutput)
-            self.assertIn("@brian", kwargs.get("prompt", ""))
-            self.assertIn("Critical Blocker", kwargs.get("prompt", ""))
-            self.assertIn("Hey @brian please check this ASAP", kwargs.get("prompt", ""))
+        def fake_run_sync(user_prompt):
+            self.assertIn("@brian", user_prompt)
+            self.assertIn("Critical Blocker", user_prompt)
+            self.assertIn("Hey @brian please check this ASAP", user_prompt)
             return mock_res
 
-        mock_ai.generate.side_effect = fake_generate
+        mock_agent.run_sync.side_effect = fake_run_sync
 
         task = Task(
             id="task_1",
@@ -140,31 +138,29 @@ class TestRankerEngine(unittest.TestCase):
             issue=issue_data,
             github_username="brian",
             gemini_api_key="AIzaSyRankerKey",
-            ai=mock_ai
+            agent=mock_agent
         )
         self.assertEqual(ranked.priority, 0.92)
         self.assertFalse(ranked.priority_needs_updated)
 
-    @patch("genkit_google_genai.GoogleAI")
-    @patch("genkit.Genkit")
-    def test_get_genkit_ai_uses_gemini_api_key(self, mock_genkit_cls, mock_google_ai_cls):
-        from task import get_genkit_ai
-        mock_genkit_instance = MagicMock()
-        mock_genkit_cls.return_value = mock_genkit_instance
+    @patch("pydantic_ai.providers.google.GoogleProvider")
+    @patch("pydantic_ai.models.google.GoogleModel")
+    @patch("pydantic_ai.Agent")
+    def test_get_pydantic_ai_agent_uses_gemini_api_key(self, mock_agent_cls, mock_model_cls, mock_provider_cls):
+        from task import get_pydantic_ai_agent
+        mock_agent_instance = MagicMock()
+        mock_agent_cls.return_value = mock_agent_instance
 
-        client = get_genkit_ai(api_key="custom_key_12345")
-        mock_google_ai_cls.assert_called_with(api_key="custom_key_12345")
-        self.assertEqual(client, mock_genkit_instance)
+        agent = get_pydantic_ai_agent(api_key="custom_key_12345")
+        mock_provider_cls.assert_called_with(api_key="custom_key_12345")
+        self.assertEqual(agent, mock_agent_instance)
 
     def test_run_ranker_fallback_on_error(self):
-        mock_ai = MagicMock()
-        async def fake_generate_error(**kwargs):
-            raise RuntimeError("API quota exceeded or network error")
-
-        mock_ai.generate.side_effect = fake_generate_error
+        mock_agent = MagicMock()
+        mock_agent.run_sync.side_effect = RuntimeError("API quota exceeded or network error")
 
         task = Task(id="task_err", priority=0.65, priority_needs_updated=True)
-        ranked = run_ranker(task=task, gemini_api_key="bad_key", ai=mock_ai)
+        ranked = run_ranker(task=task, gemini_api_key="bad_key", agent=mock_agent)
         # Priority should be preserved and priority_needs_updated reset to False
         self.assertEqual(ranked.priority, 0.65)
         self.assertFalse(ranked.priority_needs_updated)

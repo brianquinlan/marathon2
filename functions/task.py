@@ -46,151 +46,11 @@ class Task(BaseModel):
         return "task_unknown"
 
 
-class TaskPriorityOutput(BaseModel):
-    priority: float = Field(
-        description="A priority score between 0.0 (lowest) and 1.0 (highest) indicating urgency."
-    )
-    reasoning: Optional[str] = Field(
-        default=None,
-        description="Brief explanation of why this priority score was assigned."
-    )
-
-
-# ============================================================================
-# Ranker Engine: Genkit & Gemini Flash
-# ============================================================================
-
-_genkit_instances: Dict[str, Any] = {}
-_genkit_lock = threading.Lock()
-
-
-def get_genkit_ai(api_key: Optional[str] = None):
-    """
-    Lazily initializes and caches Genkit instances configured with GoogleAI plugin per API key.
-    """
-    effective_key = api_key or os.environ.get("GEMINI_API_KEY") or ""
-    with _genkit_lock:
-        if effective_key not in _genkit_instances:
-            from genkit import Genkit
-            from genkit_google_genai import GoogleAI
-            plugins = [GoogleAI(api_key=effective_key)] if effective_key else [GoogleAI()]
-            _genkit_instances[effective_key] = Genkit(plugins=plugins)
-        return _genkit_instances[effective_key]
-
-
-def run_ranker(
-    task: Task,
-    issue: Optional[Dict[str, Any]] = None,
-    github_username: Optional[str] = None,
-    gemini_api_key: Optional[str] = None,
-    ai: Optional[Any] = None
-) -> Task:
-    """
-    Ranker engine that computes priority for a single task using Firebase Genkit
-    and the latest Gemini Flash model ('googleai/gemini-flash-latest').
-    Takes the GitHub issue metadata, comments, the current user's GitHub username,
-    and the user's Gemini API key.
-    """
-    logger.info(f"Ranker engine processing task {task.doc_id} (github_username={github_username}, has_gemini_key={bool(gemini_api_key)}).")
-
-    issue_data = issue or {}
-    comments = issue_data.get("comments") or []
-
-    # Construct prompt context
-    user_info_str = f"@{github_username}" if github_username else "Unknown (not specified)"
-
-    comments_text_list = []
-    for idx, c in enumerate(comments, 1):
-        if isinstance(c, dict):
-            c_author = c.get("user_login") or "unknown"
-            c_body = c.get("body") or ""
-            c_time = c.get("created_at") or ""
-            comments_text_list.append(f"Comment {idx} by @{c_author} ({c_time}):\n{c_body}")
-        elif isinstance(c, str):
-            comments_text_list.append(f"Comment {idx}:\n{c}")
-
-    comments_formatted = "\n\n".join(comments_text_list) if comments_text_list else "No comments on this issue."
-
-    issue_title = issue_data.get("title") or task.github_issue_title or "Untitled Issue"
-    issue_body = issue_data.get("body") or "No issue description provided."
-    issue_state = issue_data.get("state") or "open"
-    issue_author = issue_data.get("user") or "unknown"
-    issue_labels = issue_data.get("labels") or []
-    issue_assignees = issue_data.get("assignees") or []
-
-    system_instruction = (
-        "You are an expert AI developer productivity assistant that assigns a priority score "
-        "between 0.0 (lowest) and 1.0 (highest) to GitHub issues/tasks for a software engineer.\n"
-        "Evaluation Criteria:\n"
-        "- Direct user mentions or requests for action: If the current user is @mentioned in the issue body or comments, or explicitly asked for input/review/action, assign HIGH priority (0.80 - 1.00).\n"
-        "- Directly assigned or blocker bugs: High priority bugs, regressions, or issues assigned to the user should be rated 0.70 - 0.90.\n"
-        "- Active discussions or questions: Active ongoing discussions where the user is involved or monitored repo issues should be rated 0.40 - 0.70.\n"
-        "- Informational / low urgency: Low impact feature requests, minor discussions, or items not requiring immediate attention should be rated 0.10 - 0.40.\n"
-        "- Closed or resolved: 0.00 - 0.10.\n"
-        "Always return a structured JSON response conforming to the TaskPriorityOutput schema with a numerical priority float."
-    )
-
-    prompt_text = f"""
-Current User GitHub Username: {user_info_str}
-
-GitHub Issue Details:
-- Title: {issue_title}
-- State: {issue_state}
-- Author: @{issue_author}
-- Assignees: {issue_assignees}
-- Labels: {issue_labels}
-
-Issue Description:
-{issue_body}
-
-Chronological Comments ({len(comments)} comments):
-{comments_formatted}
-
-Please evaluate the priority for the user {user_info_str} and assign a priority score between 0.0 and 1.0.
-""".strip()
-
-    try:
-        client = ai or get_genkit_ai(api_key=gemini_api_key)
-
-        import asyncio
-        async def _generate_priority():
-            return await client.generate(
-                model="googleai/gemini-flash-latest",
-                system=system_instruction,
-                prompt=prompt_text,
-                output_schema=TaskPriorityOutput,
-            )
-
-        try:
-            loop = asyncio.get_running_loop()
-        except RuntimeError:
-            loop = None
-
-        if loop and loop.is_running():
-            import concurrent.futures
-            with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
-                res = executor.submit(lambda: asyncio.run(_generate_priority())).result()
-        else:
-            res = asyncio.run(_generate_priority())
-
-        computed_priority = 0.5
-        if hasattr(res, "output") and res.output is not None:
-            if isinstance(res.output, TaskPriorityOutput):
-                computed_priority = res.output.priority
-            elif isinstance(res.output, dict):
-                computed_priority = float(res.output.get("priority", 0.5))
-            elif hasattr(res.output, "priority"):
-                computed_priority = float(res.output.priority)
-
-        computed_priority = max(0.0, min(1.0, float(computed_priority)))
-        task.priority = computed_priority
-        logger.info(f"Genkit assigned priority {task.priority:.2f} to task {task.doc_id}")
-
-    except Exception as e:
-        logger.error(f"Error running Genkit ranker for task {task.doc_id}: {e}. Keeping existing priority.")
-
-    task.priority_needs_updated = False
-    return task
+from genai_ranker import (
+    TaskPriorityOutput,
+    get_pydantic_ai_agent,
+    run_ranker,
+)
 
 
 # ============================================================================
@@ -300,13 +160,20 @@ def update_task_priority(uid: str, task_id: str, db: firestore.Client) -> Dict[s
     GitHub issue (including comments) and the user's github_username, calls the
     Genkit ranker, and persists the updated priority back to Firestore.
     """
+    logger.info(f"[UPDATE_TASK_PRIORITY] Starting update_task_priority: uid={uid}, task_id={task_id}")
     task_ref = db.collection("users").document(uid).collection("tasks").document(task_id)
     doc_snap = task_ref.get()
     if not doc_snap.exists:
-        logger.warning(f"Task {task_id} not found for UID {uid}.")
+        logger.warning(f"[UPDATE_TASK_PRIORITY] Task document {task_id} NOT found for UID {uid}.")
         return {"status": "not_found", "task_id": task_id, "uid": uid}
 
-    task = Task.model_validate({**(doc_snap.to_dict() or {}), "id": task_id})
+    raw_task_data = doc_snap.to_dict() or {}
+    task = Task.model_validate({**raw_task_data, "id": task_id})
+    logger.info(
+        f"[UPDATE_TASK_PRIORITY] Loaded task {task_id}: title='{task.github_issue_title}', "
+        f"priority={task.priority}, priority_needs_updated={task.priority_needs_updated}, "
+        f"github_issue_id='{task.github_issue_id}'"
+    )
 
     # Fetch associated issue and comments from users/{uid}/issues/{issue_id}
     issue_id = task.github_issue_id or (task_id[5:] if task_id.startswith("task_") else task_id)
@@ -316,6 +183,9 @@ def update_task_priority(uid: str, task_id: str, db: firestore.Client) -> Dict[s
         issue_snap = issue_ref.get()
         if issue_snap.exists:
             issue_data = issue_snap.to_dict() or {}
+            logger.info(f"[UPDATE_TASK_PRIORITY] Found issue doc {issue_id} with {len(issue_data.get('comments', []))} comments.")
+        else:
+            logger.warning(f"[UPDATE_TASK_PRIORITY] Issue doc {issue_id} not found in users/{uid}/issues/.")
 
     # Fetch user profile to get github_username and gemini_api_key
     user_ref = db.collection("users").document(uid)
@@ -326,6 +196,12 @@ def update_task_priority(uid: str, task_id: str, db: firestore.Client) -> Dict[s
         u_dict = user_snap.to_dict() or {}
         github_username = u_dict.get("github_username")
         gemini_api_key = u_dict.get("gemini_api_key")
+        logger.info(
+            f"[UPDATE_TASK_PRIORITY] User profile loaded: github_username='{github_username}', "
+            f"has_gemini_key={bool(gemini_api_key)}"
+        )
+    else:
+        logger.warning(f"[UPDATE_TASK_PRIORITY] User profile document users/{uid} does not exist.")
 
     ranked_task = run_ranker(
         task=task,
@@ -334,13 +210,15 @@ def update_task_priority(uid: str, task_id: str, db: firestore.Client) -> Dict[s
         gemini_api_key=gemini_api_key
     )
 
-    task_ref.set({
+    update_payload = {
         "priority": ranked_task.priority,
         "priority_needs_updated": False,
         "updated_at": firestore.SERVER_TIMESTAMP,
-    }, merge=True)
+    }
+    logger.info(f"[UPDATE_TASK_PRIORITY] Writing updated task {task_id} to Firestore with payload: {update_payload}")
+    task_ref.set(update_payload, merge=True)
 
-    logger.info(f"Updated priority for task {task_id} for user {uid} -> {ranked_task.priority:.2f}.")
+    logger.info(f"[UPDATE_TASK_PRIORITY] Successfully updated priority for task {task_id} for user {uid} -> {ranked_task.priority:.2f}.")
     return {
         "status": "success",
         "task_id": task_id,
