@@ -7,7 +7,9 @@ from __future__ import annotations
 
 import logging
 import os
+import random
 import threading
+import time
 from typing import Protocol, TypeVar
 
 from pydantic import BaseModel, Field
@@ -167,7 +169,35 @@ Please evaluate the priority for the user {user_info_str} and assign a priority 
     active_agent = agent or get_pydantic_ai_agent(api_key=gemini_api_key, system_prompt=DEFAULT_SYSTEM_PROMPT)
     logger.info(f"[RANKER] Executing synchronous run_sync with Pydantic AI for task {task.doc_id}...")
 
-    result = active_agent.run_sync(user_prompt=prompt_text)
+    max_attempts = 4
+    result = None
+    for attempt in range(1, max_attempts + 1):
+        try:
+            result = active_agent.run_sync(user_prompt=prompt_text)
+            break
+        except Exception as e:
+            err_str = str(e).lower()
+            is_rate_limit = (
+                "429" in err_str
+                or "resource_exhausted" in err_str
+                or "resourceexhausted" in err_str
+                or "quota" in err_str
+                or "too many requests" in err_str
+                or "rate" in err_str
+            )
+            if is_rate_limit and attempt < max_attempts:
+                sleep_secs = (2 ** (attempt - 1)) + random.uniform(0.5, 1.5)
+                logger.warning(
+                    f"[RANKER] Rate limit hit for {task.doc_id} (attempt {attempt}/{max_attempts}). "
+                    f"Retrying in {sleep_secs:.2f}s: {e}"
+                )
+                time.sleep(sleep_secs)
+            else:
+                raise
+
+    if result is None:
+        raise RuntimeError(f"[RANKER] Failed to get response for task {task.doc_id} after {max_attempts} attempts.")
+
     logger.info(f"[RANKER] Pydantic AI call succeeded for {task.doc_id}. Output: {result.output}")
 
     computed_priority = 0.5

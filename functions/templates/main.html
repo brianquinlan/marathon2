@@ -31,24 +31,22 @@
       <table>
         <thead>
           <tr>
-            <th>Rank</th>
+            <th>Issue</th>
             <th>Priority</th>
             <th>Issue Title</th>
-            <th>Upvotes</th>
             <th>Status</th>
           </tr>
         </thead>
         <tbody>
           {% for task in tasks %}
             <tr>
-              <td>#{{ loop.index }}</td>
+              <td>{{ task.github_issue_id or task.issue_id or "" }}</td>
               <td>{{ "%.2f"|format(task.priority or 0.0) }}</td>
               <td>
                 <a href="{{ task.github_issue_url or task.issue_url or '#' }}" target="_blank" rel="noopener noreferrer">
                   {{ task.github_issue_title or task.title or task.github_issue_id or task.issue_id or "Untitled Task" }}
                 </a>
               </td>
-              <td>👍 {{ task.github_issue_upvotes or 0 }}</td>
               <td>{{ "Needs Rerank" if task.priority_needs_updated else "Ranked" }}</td>
             </tr>
           {% endfor %}
