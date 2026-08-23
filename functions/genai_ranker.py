@@ -3,6 +3,7 @@ GenAI Task Ranking Module using Pydantic AI and Google Gemini Flash.
 Evaluates individual tasks with GitHub issue metadata, comments, and username mentions.
 """
 
+from pydantic import ConfigDict
 from __future__ import annotations
 
 import json
@@ -27,6 +28,17 @@ class TaskPriorityOutput(BaseModel):
         default=None, description="Brief explanation of why this priority score was assigned."
     )
 
+
+class IssuePayload(BaseModel):
+    """
+    Structured container holding the raw GitHub Issue and Comments JSON payloads.
+    Directly passable to Pydantic AI / Gemini for ranking without manual field extraction.
+    """
+
+    model_config = ConfigDict(arbitrary_types_allowed=True)
+
+    issue: dict[str, object] = Field(default_factory=dict)
+    comments: list[dict[str, object]] = Field(default_factory=list)
 
 class TaskProtocol(Protocol):
     @property
