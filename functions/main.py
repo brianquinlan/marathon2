@@ -20,7 +20,7 @@ from google.cloud import firestore
 from google.cloud.firestore import SERVER_TIMESTAMP
 
 from auth_utils import extract_provider_info, fetch_full_user_auth_record, verify_bearer_token
-from github_sync import get_user_stored_issues, start_user_github_sync, sync_all_users_closed_issues
+from github_sync import start_user_github_sync, sync_all_users_closed_issues
 from task import enqueue_task_ranking, force_rerank_tasks, get_user_tasks, update_task_priority
 from user import User
 
@@ -441,31 +441,8 @@ def sync_github_issues(req: https_fn.CallableRequest) -> dict[str, object]:
         ) from e
 
 
-@https_fn.on_call(cors=options.CorsOptions(cors_origins="*", cors_methods=["get", "post", "options"]))
-def get_stored_issues(req: https_fn.CallableRequest) -> dict[str, object]:
-    """
-    Retrieves stored issues for the authenticated user from Firestore under users/{uid}/issues.
-    """
-    if not req.auth or not req.auth.uid:
-        raise https_fn.HttpsError(
-            code=https_fn.FunctionsErrorCode.UNAUTHENTICATED, message="User must be authenticated to retrieve issues."
-        )
-
-    uid = str(req.auth.uid)
-    payload: dict[str, object] = req.data if isinstance(req.data, dict) else {}
-    raw_lim = payload.get("limit", 100)
-    limit = int(raw_lim) if isinstance(raw_lim, (int, str)) and str(raw_lim).isdigit() else 100
-
-    issues = get_user_stored_issues(uid=uid, db=db, limit=limit)
-    return {
-        "status": "success",
-        "count": len(issues),
-        "issues": issues,
-    }
-
-
 # ============================================================================
-# Firebase Task Queue Functions: Chained Issue & Comment Pagination
+# Firebase Task Queue Functions: Issue Pagination
 # ============================================================================
 
 
@@ -475,8 +452,8 @@ def get_stored_issues(req: https_fn.CallableRequest) -> dict[str, object]:
 )
 def sync_github_issues_page(req: tasks_fn.CallableRequest) -> dict[str, object]:
     """
-    Processes one page of GitHub issues for a given user, stores them in Firestore,
-    enqueues comment fetching for each issue, and chains to the next page if available.
+    Processes one page of GitHub issues for a given user, updates Tasks in Firestore,
+    and chains to the next page if available.
     """
     data: dict[str, object] = req.data if isinstance(req.data, dict) else {}
     raw_uid = data.get("uid")
@@ -507,37 +484,6 @@ def sync_github_issues_page(req: tasks_fn.CallableRequest) -> dict[str, object]:
         owner_fallback=owner_fallback,
         repo_fallback=repo_fallback,
         db=db,
-    )
-
-
-@tasks_fn.on_task_dispatched(
-    retry_config=options.RetryConfig(max_attempts=3, min_backoff_seconds=10, max_backoff_seconds=300, max_doublings=3),
-    rate_limits=options.RateLimits(max_concurrent_dispatches=15, max_dispatches_per_second=15),
-)
-def sync_issue_comments_page(req: tasks_fn.CallableRequest) -> dict[str, object]:
-    """
-    Processes one page of comments for an issue, updates Firestore,
-    and chains to the next page of comments if available.
-    """
-    data: dict[str, object] = req.data if isinstance(req.data, dict) else {}
-    raw_uid = data.get("uid")
-    uid = str(raw_uid) if raw_uid is not None else None
-    raw_doc = data.get("issue_doc_id")
-    issue_doc_id = str(raw_doc) if raw_doc is not None else None
-    raw_url = data.get("comments_url")
-    comments_url = str(raw_url) if raw_url is not None else None
-    raw_params = data.get("params")
-    params: dict[str, object] | None = raw_params if isinstance(raw_params, dict) else None
-
-    if not uid or not issue_doc_id or not comments_url:
-        raise tasks_fn.HttpsError(
-            code=tasks_fn.FunctionsErrorCode.INVALID_ARGUMENT, message="Missing required parameters for comment sync."
-        )
-
-    from github_sync import execute_comment_page_sync
-
-    return execute_comment_page_sync(
-        uid=uid, issue_doc_id=issue_doc_id, comments_url=comments_url, params=params if params else None, db=db
     )
 
 

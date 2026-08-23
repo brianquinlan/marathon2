@@ -49,6 +49,18 @@ class AssociationReason(str, Enum):
     MONITORED_REPO = "monitored_repo"
 
 
+class IssuePayload(BaseModel):
+    """
+    Structured container holding the raw GitHub Issue and Comments JSON payloads.
+    Directly passable to Pydantic AI / Gemini for ranking without manual field extraction.
+    """
+
+    model_config = ConfigDict(arbitrary_types_allowed=True)
+
+    issue: dict[str, object] = Field(default_factory=dict)
+    comments: list[dict[str, object]] = Field(default_factory=list)
+
+
 class Comment(BaseModel):
     model_config = ConfigDict(arbitrary_types_allowed=True)
 
@@ -103,10 +115,6 @@ class Issue(BaseModel):
         clean_owner = re.sub(r"[^a-zA-Z0-9_-]", "_", self.owner)
         clean_repo = re.sub(r"[^a-zA-Z0-9_-]", "_", self.repo)
         return f"{clean_owner}_{clean_repo}_{self.issue_number}"
-
-    @property
-    def created_atr(self) -> datetime:
-        return self.created_at
 
 
 def _safe_int(val: object, default: int = 0) -> int:
@@ -300,38 +308,6 @@ def fetch_single_issue_page_pygithub(
         return [], False
 
 
-def fetch_single_comment_page_pygithub(
-    client: Github,
-    owner: str,
-    repo: str,
-    issue_number: int,
-    since: datetime | None = None,
-    page: int = 0,
-    per_page: int = 100,
-) -> tuple[list[Comment], bool]:
-    """
-    Fetches a single page (0-indexed) of comments for an issue using PyGithub.
-    Returns (comments, has_next_page).
-    """
-    try:
-        repository = client.get_repo(f"{owner}/{repo}")
-        issue = repository.get_issue(issue_number)
-        paginated: PaginatedList[PyghComment] = issue.get_comments(since=since or GithubObject.NotSet)
-        pygh_comments = list(paginated.get_page(page))
-        comments = [comment_from_pygithub(c) for c in pygh_comments]
-        has_next = len(pygh_comments) >= per_page
-        return comments, has_next
-    except GithubException as e:
-        if e.status in (401, 403):
-            raise PermissionError(f"GitHub API authorization error ({e.status}): {e.data}") from e
-        elif e.status == 404:
-            return [], False
-        raise
-    except Exception as e:
-        logger.error(f"Error fetching comments for {owner}/{repo}#{issue_number} (page={page}): {e}")
-        return [], False
-
-
 # ============================================================================
 # Backwards-Compatible Page Fetching Helpers (used in existing sync flows)
 # ============================================================================
@@ -409,44 +385,30 @@ def fetch_single_issue_page(
         return [], None
 
 
-def fetch_single_comment_page(
-    comments_url: str, headers: dict[str, str], params: Mapping[str, object] | None = None, client: Github | None = None
-) -> tuple[list[Comment], str | None]:
-    """
-    Fetches a single page of comments and returns (comments, next_page_url).
-    Delegates to PyGithub client when available.
-    """
-    try:
-        token = headers.get("Authorization", "").replace("Bearer ", "").replace("token ", "").strip()
-        g = client or (get_github_client(token) if token else None)
-        if not g:
-            return [], None
-
-        match = re.search(r"repos/([^/]+)/([^/]+)/issues/(\d+)/comments", comments_url)
-        if not match:
-            return [], None
-
-        owner, repo, issue_num = match.group(1), match.group(2), int(match.group(3))
-        page = _safe_int(params.get("page"), default=0) if params else 0
-        per_page = _safe_int(params.get("per_page"), default=100) if params else 100
-        since_raw = params.get("since") if params else None
-        since_dt = _parse_github_datetime(since_raw)
-
-        comments, has_next = fetch_single_comment_page_pygithub(
-            client=g, owner=owner, repo=repo, issue_number=issue_num, since=since_dt, page=page, per_page=per_page
-        )
-        next_url = f"{comments_url}?page={page + 1}" if has_next else None
-        return comments, next_url
-    except PermissionError:
-        raise
-    except Exception as e:
-        logger.error(f"Error fetching comments from {comments_url}: {e}")
-        return [], None
-
-
 # ============================================================================
-# Page Processing & Firestore Persistence
+# In-Memory Fetcher & Page Processing
 # ============================================================================
+
+
+def fetch_issue_in_memory(
+    access_token: str,
+    owner: str,
+    repo: str,
+    issue_number: int,
+    client: Github | None = None,
+) -> IssuePayload:
+    """
+    Fetches the raw issue and comments JSON directly from GitHub into memory via PyGithub.
+    Used on-demand by the ranker without storing intermediate issue documents in Firestore.
+    """
+    g = client or get_github_client(access_token)
+    pygh_repo = g.get_repo(f"{owner}/{repo}")
+    pygh_issue = pygh_repo.get_issue(number=issue_number)
+
+    raw_issue: dict[str, object] = pygh_issue.raw_data or {}
+    raw_comments: list[dict[str, object]] = [c.raw_data for c in pygh_issue.get_comments() if c and c.raw_data]
+
+    return IssuePayload(issue=raw_issue, comments=raw_comments)
 
 
 def process_and_save_issue_page(
@@ -458,167 +420,61 @@ def process_and_save_issue_page(
     repo_fallback: str | None = None,
 ) -> list[str]:
     """
-    Parses a page of raw GitHub issue dicts and merges them with existing Firestore documents.
-    Note: Tasks are only created here if the issue has 0 comments (otherwise created when comments finish).
+    Processes a page of GitHub issues for a given user and directly creates or updates
+    the associated Task document in Firestore (users/{uid}/tasks/task_{doc_id}).
+    Does not store intermediate issue documents in Firestore.
     """
-    if not raw_items:
-        return []
-
-    issues_col = db.collection("users").document(uid).collection("issues")
     saved_doc_ids: list[str] = []
 
     for item in raw_items:
+        raw_num = item.get("number", 0)
+        issue_number = int(raw_num) if isinstance(raw_num, (int, str)) and str(raw_num).isdigit() else 0
+        if issue_number <= 0:
+            continue
+
         owner, repo = _extract_owner_and_repo(item)
         if owner == "unknown" and owner_fallback:
             owner = owner_fallback
         if repo == "unknown" and repo_fallback:
             repo = repo_fallback
 
-        raw_num = item.get("number", 0)
-        issue_number = int(raw_num) if isinstance(raw_num, (int, str)) and str(raw_num).isdigit() else 0
-        is_pr = bool(item.get("pull_request"))
-        issue_type = IssueType.PULL_REQUEST if is_pr else IssueType.ISSUE
-
-        comments_url = str(
-            item.get("comments_url") or f"{GITHUB_API_BASE_URL}/repos/{owner}/{repo}/issues/{issue_number}/comments"
-        )
-        created_at = _parse_github_datetime(item.get("created_at")) or datetime.now(timezone.utc)
-        updated_at = _parse_github_datetime(item.get("updated_at")) or datetime.now(timezone.utc)
-
-        raw_assignees = item.get("assignees", [])
-        assignees: list[str] = []
-        if isinstance(raw_assignees, list):
-            for a in raw_assignees:
-                if isinstance(a, dict) and a.get("login"):
-                    assignees.append(str(a["login"]))
-
-        raw_single_a = item.get("assignee")
-        if not assignees and isinstance(raw_single_a, dict):
-            single_a = raw_single_a.get("login")
-            if single_a:
-                assignees = [str(single_a)]
-
-        clean_owner = re.sub(r"[^a-zA-Z0-9_-]", "_", owner)
-        clean_repo = re.sub(r"[^a-zA-Z0-9_-]", "_", repo)
+        clean_owner = re.sub(r"[^a-zA-Z0-9_-]", "_", str(owner))
+        clean_repo = re.sub(r"[^a-zA-Z0-9_-]", "_", str(repo))
         doc_id = f"{clean_owner}_{clean_repo}_{issue_number}"
 
-        # Fetch existing document to merge association_reasons and preserve existing comments
-        doc_ref = issues_col.document(doc_id)
-        doc_snap = doc_ref.get()
+        is_pr = "pull_request" in item or "pull_request" in str(item.get("html_url", ""))
+        issue_type = IssueType.PULL_REQUEST if is_pr else IssueType.ISSUE
+
+        raw_reactions = item.get("reactions")
+        upvotes = 0
+        if isinstance(raw_reactions, dict):
+            upvotes = _safe_int(raw_reactions.get("+1"), 0)
 
         parsed_reason = (
             AssociationReason(reason)
             if isinstance(reason, str) and reason in AssociationReason._value2member_map_
             else (reason if isinstance(reason, AssociationReason) else AssociationReason.ASSIGNED)
         )
-        reasons: set[AssociationReason] = {parsed_reason}
-        existing_comments: list[Comment] = []
-        last_comment_time: datetime | None = None
 
-        if doc_snap.exists:
-            existing_data = doc_snap.to_dict() or {}
-            for r in existing_data.get("association_reasons") or []:
-                if isinstance(r, str) and r in AssociationReason._value2member_map_:
-                    reasons.add(AssociationReason(r))
-                elif isinstance(r, AssociationReason):
-                    reasons.add(r)
-            existing_comments = [
-                Comment.model_validate(c) for c in existing_data.get("comments", []) if isinstance(c, dict)
-            ]
-            last_comment_time = _parse_github_datetime(existing_data.get("last_comment_update_time"))
+        issue_payload: dict[str, object] = {
+            "title": str(item["title"]) if item.get("title") is not None else None,
+            "url": str(item.get("html_url") or item.get("url") or ""),
+            "owner": owner,
+            "repo": repo,
+            "issue_number": issue_number,
+            "upvotes": upvotes,
+            "issue_type": issue_type.value,
+            "association_reasons": [parsed_reason.value],
+        }
 
-        raw_user = item.get("user")
-        user_login_str = str(raw_user.get("login", "unknown")) if isinstance(raw_user, dict) else "unknown"
-
-        issue = Issue(
-            url=str(item.get("html_url") or item.get("url") or ""),
-            owner=owner,
-            repo=repo,
-            issue_number=issue_number,
-            number=issue_number,
-            title=str(item["title"]) if item.get("title") is not None else None,
-            issue_type=issue_type,
-            state=str(item.get("state", "open")),
-            comments_url=comments_url,
-            body=str(item["body"]) if item.get("body") is not None else None,
-            user_login=user_login_str,
-            assignee_logins=assignees,
-            created_at=created_at,
-            updated_at=updated_at,
-            last_comment_update_time=last_comment_time,
-            comments=existing_comments,
-            association_reasons=sorted(list(reasons), key=lambda x: x.value),
-        )
-
-        issue_dict = issue.model_dump(mode="json")
-        issue_dict["synced_at"] = firestore.SERVER_TIMESTAMP
-        doc_ref.set(issue_dict, merge=True)
-
-        # Only create Task immediately if the issue has 0 comments (already fully imported)
-        raw_cc = item.get("comments", 0)
-        comments_count = int(raw_cc) if isinstance(raw_cc, (int, str)) and str(raw_cc).isdigit() else 0
-        if comments_count == 0:
-            ensure_task_for_issue(uid=uid, issue_id=doc_id, issue_data=issue.model_dump(mode="json"), db=db)
-            logger.info(f"Created/updated Task for issue {doc_id} with 0 comments.")
-
+        # Create/update Task directly in Firestore
+        ensure_task_for_issue(uid=uid, issue_id=doc_id, issue_data=issue_payload, db=db)
         saved_doc_ids.append(doc_id)
 
-    logger.info(f"Processed and saved {len(saved_doc_ids)} issues for UID {uid} under reason '{reason}'.")
-    return saved_doc_ids
-
-
-def process_and_save_comment_page(
-    uid: str, issue_doc_id: str, new_comments: list[Comment], db: firestore.Client, is_last_page: bool = False
-) -> int:
-    """
-    Appends or merges a page of comments into the Firestore issue document,
-    and updates last_comment_update_time.
-    When is_last_page is True, creates/updates the Task since the Issue and all comments are fully imported.
-    """
-    issue_ref = db.collection("users").document(uid).collection("issues").document(issue_doc_id)
-    doc_snap = issue_ref.get()
-
-    if not doc_snap.exists:
-        logger.warning(f"Cannot save comments: issue {issue_doc_id} not found for UID {uid}")
-        return 0
-
-    existing_data = doc_snap.to_dict() or {}
-    existing_comments = [Comment.model_validate(c) for c in existing_data.get("comments", []) if isinstance(c, dict)]
-
-    # Deduplicate comments by ID
-    comments_by_id: dict[int, Comment] = {c.id: c for c in existing_comments}
-    for nc in new_comments:
-        comments_by_id[nc.id] = nc
-
-    all_comments = sorted(
-        list(comments_by_id.values()), key=lambda c: c.created_at or datetime.min.replace(tzinfo=timezone.utc)
+    logger.info(
+        f"Processed and created/updated tasks for {len(saved_doc_ids)} issues for UID {uid} under reason '{reason}'."
     )
-
-    valid_times: list[datetime] = [t for t in [c.updated_at or c.created_at for c in all_comments] if t is not None]
-    last_comment_time: datetime | None = max(valid_times, default=None)
-
-    update_payload: dict[str, object] = {
-        "comments": [c.model_dump(mode="json") for c in all_comments],
-        "updated_at": firestore.SERVER_TIMESTAMP,
-    }
-    if last_comment_time:
-        update_payload["last_comment_update_time"] = last_comment_time.isoformat()
-
-    issue_ref.set(update_payload, merge=True)
-    logger.info(f"Saved {len(new_comments)} comments for issue {issue_doc_id} (Total: {len(all_comments)}).")
-
-    # If all comments have been imported, create/update the associated Task!
-    if is_last_page:
-        updated_issue_data = {**existing_data, **update_payload}
-        ensure_task_for_issue(uid=uid, issue_id=issue_doc_id, issue_data=updated_issue_data, db=db)
-        logger.info(f"Issue {issue_doc_id} and all comments fully imported. Created/updated Task.")
-
-    return len(new_comments)
-
-
-# ============================================================================
-# Execution & Task Queue Enqueuers (Chaining Pagination)
-# ============================================================================
+    return saved_doc_ids
 
 
 def execute_issue_page_sync(
@@ -631,7 +487,7 @@ def execute_issue_page_sync(
     db: firestore.Client,
 ) -> dict[str, object]:
     """
-    Executes fetching one page of issues and scheduling comment sync for each.
+    Executes fetching one page of issues from GitHub and chaining to the next page if available.
     """
     user_ref = db.collection("users").document(uid)
     doc_snap = user_ref.get()
@@ -655,33 +511,6 @@ def execute_issue_page_sync(
         uid=uid, raw_items=items, reason=reason, db=db, owner_fallback=owner_fallback, repo_fallback=repo_fallback
     )
 
-    # Enqueue comment fetching tasks for each issue in this page
-    for item in items:
-        raw_num = item.get("number", 0)
-        issue_number = int(raw_num) if isinstance(raw_num, (int, str)) and str(raw_num).isdigit() else 0
-        comments_url = item.get("comments_url")
-        if not comments_url:
-            continue
-
-        owner, repo = _extract_owner_and_repo(item)
-        if owner == "unknown" and owner_fallback:
-            owner = owner_fallback
-        if repo == "unknown" and repo_fallback:
-            repo = repo_fallback
-        clean_owner = re.sub(r"[^a-zA-Z0-9_-]", "_", str(owner))
-        clean_repo = re.sub(r"[^a-zA-Z0-9_-]", "_", str(repo))
-        doc_id = f"{clean_owner}_{clean_repo}_{issue_number}"
-
-        raw_cc = item.get("comments", 0)
-        comments_count = int(raw_cc) if isinstance(raw_cc, (int, str)) and str(raw_cc).isdigit() else 0
-        if comments_count > 0:
-            comment_params: dict[str, object] = {"per_page": 100, "page": 0}
-            if user.last_assigned_issue_update_time:
-                comment_params["since"] = user.last_assigned_issue_update_time
-            enqueue_comment_page_sync(
-                uid=uid, issue_doc_id=doc_id, comments_url=str(comments_url), params=comment_params, db=db
-            )
-
     # Chain next page of issues if present
     next_task_id = None
     if next_url:
@@ -703,56 +532,6 @@ def execute_issue_page_sync(
     return {
         "status": "success",
         "saved_count": len(saved_doc_ids),
-        "next_url": next_url,
-        "next_task_id": next_task_id,
-    }
-
-
-def execute_comment_page_sync(
-    uid: str, issue_doc_id: str, comments_url: str, params: Mapping[str, object] | None, db: firestore.Client
-) -> dict[str, object]:
-    """
-    Executes fetching one page of comments and chaining if necessary.
-    """
-    user_ref = db.collection("users").document(uid)
-    doc_snap = user_ref.get()
-    if not doc_snap.exists:
-        return {"status": "error", "message": "User document not found."}
-
-    raw_user_dict = doc_snap.to_dict() or {}
-    user = User.model_validate({**raw_user_dict, "uid": uid})
-    if not user.github_access_token:
-        return {"status": "error", "message": "User does not have github_access_token configured."}
-
-    headers = {
-        "Authorization": f"Bearer {user.github_access_token}",
-        "Accept": "application/vnd.github+json",
-        "X-GitHub-Api-Version": "2022-11-28",
-    }
-
-    client = get_github_client(user.github_access_token)
-    comments, next_url = fetch_single_comment_page(
-        comments_url=comments_url, headers=headers, params=params, client=client
-    )
-
-    saved_count = process_and_save_comment_page(
-        uid=uid, issue_doc_id=issue_doc_id, new_comments=comments, db=db, is_last_page=(next_url is None)
-    )
-
-    next_task_id = None
-    if next_url:
-        page_val = _safe_int(params.get("page"), default=0) if params else 0
-        next_params: dict[str, object] = dict(params) if params else {}
-        next_params["page"] = page_val + 1
-
-        next_task_id = enqueue_comment_page_sync(
-            uid=uid, issue_doc_id=issue_doc_id, comments_url=comments_url, params=next_params, db=db
-        )
-        logger.info(f"Chained next comments page task {next_task_id} for issue {issue_doc_id}")
-
-    return {
-        "status": "success",
-        "saved_comments_count": saved_count,
         "next_url": next_url,
         "next_task_id": next_task_id,
     }
@@ -807,45 +586,6 @@ def enqueue_issue_page_sync(
             t.start()
             return "thread_dispatched"
         return None
-
-
-def enqueue_comment_page_sync(
-    uid: str,
-    issue_doc_id: str,
-    comments_url: str,
-    params: Mapping[str, object] | None = None,
-    db: firestore.Client | None = None,
-) -> str | None:
-    """
-    Enqueues a task to process a page of comments for a specific issue using Firebase task_queue.
-    Falls back seamlessly to background thread execution if task queue is not available in local environment.
-    """
-    try:
-        queue = admin_functions.task_queue("sync_issue_comments_page")
-        task_data = {
-            "uid": uid,
-            "issue_doc_id": issue_doc_id,
-            "comments_url": comments_url,
-            "params": dict(params) if params else {"per_page": 100},
-        }
-        task_id = queue.enqueue(task_data, opts=admin_functions.TaskOptions(dispatch_deadline_seconds=300))
-        logger.info(f"Enqueued sync_issue_comments_page task '{task_id}' for issue {issue_doc_id}")
-        return task_id
-    except Exception as e:
-        logger.warning(f"Firebase task_queue.enqueue exception ({e}). Handling fallback dispatch.")
-        if db is not None:
-
-            def _worker():
-                try:
-                    execute_comment_page_sync(
-                        uid=uid, issue_doc_id=issue_doc_id, comments_url=comments_url, params=params, db=db
-                    )
-                except Exception as ex:
-                    logger.error(f"Error in fallback execute_comment_page_sync: {ex}")
-
-            thread = threading.Thread(target=_worker, daemon=True)
-            thread.start()
-        return "fallback_dispatched"
 
 
 def fetch_github_user_login(access_token: str) -> str | None:
@@ -973,25 +713,6 @@ def start_user_github_sync(user: User, db: firestore.Client, state: str = "open"
     }
 
 
-def get_user_stored_issues(uid: str, db: firestore.Client, limit: int = 100) -> list[dict[str, object]]:
-    """
-    Retrieves stored issues from Firestore for a given user UID.
-    """
-    issues_ref = db.collection("users").document(uid).collection("issues")
-    docs = issues_ref.limit(limit).stream()
-
-    results: list[dict[str, object]] = []
-    for doc_snap in docs:
-        data = doc_snap.to_dict() or {}
-        for ts_key in ["synced_at", "created_at", "updated_at", "last_comment_update_time"]:
-            ts_val = data.get(ts_key)
-            if isinstance(ts_val, datetime):
-                data[ts_key] = ts_val.isoformat()
-        results.append(data)
-
-    return results
-
-
 # ============================================================================
 # Scheduled Closed Issues Sync & Task Cleanup
 # ============================================================================
@@ -999,7 +720,7 @@ def get_user_stored_issues(uid: str, db: firestore.Client, limit: int = 100) -> 
 
 def sync_closed_issues_for_user(user: User, db: firestore.Client, client: Github | None = None) -> dict[str, object]:
     """
-    Queries GitHub for issues closed since the last sync via PyGithub, updates their state in Firestore,
+    Queries GitHub for issues closed since the last sync via PyGithub
     and deletes the corresponding Task document from users/{uid}/tasks.
     """
     user_uid = user.uid or "unknown"
@@ -1057,7 +778,6 @@ def sync_closed_issues_for_user(user: User, db: firestore.Client, client: Github
 
     # Process and remove closed issues from tasks
     closed_count = 0
-    issues_col = db.collection("users").document(user_uid).collection("issues")
     tasks_col = db.collection("users").document(user_uid).collection("tasks")
 
     seen_doc_ids: set[str] = set()
@@ -1078,12 +798,6 @@ def sync_closed_issues_for_user(user: User, db: firestore.Client, client: Github
         if doc_id in seen_doc_ids:
             continue
         seen_doc_ids.add(doc_id)
-
-        # Update issue in Firestore to state="closed"
-        issue_ref = issues_col.document(doc_id)
-        doc_snap = issue_ref.get()
-        if doc_snap.exists:
-            issue_ref.set({"state": "closed", "updated_at": firestore.SERVER_TIMESTAMP}, merge=True)
 
         # Delete corresponding task if it exists
         task_doc_id = f"task_{doc_id}"

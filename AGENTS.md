@@ -39,14 +39,14 @@ marathon2/
 
 ### 2. Task & Issue Lifecycle
 - **Step 1**: `start_user_github_sync` schedules initial Task Queue jobs (`sync_github_issues_page`) for assigned, mentioned, created, and monitored repo issues.
-- **Step 2**: Issue pages are processed in Firestore (`users/{uid}/issues/{doc_id}`).
-- **Step 3**: Comment pages are chained via `sync_issue_comments_page`.
-- **Step 4**: Tasks (`users/{uid}/tasks/task_{doc_id}`) are created **ONLY** after all comments are fully imported (or immediately if 0 comments exist).
-- **Step 5**: Firestore trigger `on_task_written` detects `priority_needs_updated == True` and enqueues ranking via `rank_user_tasks`.
+- **Step 2**: Issue pages directly create or update Tasks (`users/{uid}/tasks/task_{doc_id}`) in Firestore. Intermediate issue and comment documents are **NOT** stored in Firestore.
+- **Step 3**: Firestore trigger `on_task_written` detects `priority_needs_updated == True` and enqueues ranking via `rank_user_tasks`.
+- **Step 4**: `update_task_priority` fetches real-time issue details and comments into memory on-demand via PyGithub (`fetch_issue_in_memory`) and runs the Pydantic AI ranker (`run_ranker`).
+- **Step 5**: The ranked priority is written back to the Task document in Firestore.
 
 ### 3. AI Ranker (Pydantic AI)
 - Uses **Pydantic AI** (`pydantic_ai.Agent`) with structured output model `TaskPriorityOutput(priority, reasoning)`.
-- Uses synchronous execution (`agent.run_sync(...)`) to guarantee compatibility with serverless worker lifecycles without event loop conflicts.
+- Uses synchronous execution (`agent.run_sync(...)`) with exponential backoff on 429/quota errors to guarantee compatibility with serverless worker lifecycles.
 
 ### 4. Direct Property Access Over Defensive Introspection
 - Do **NOT** use `getattr(doc_snap, "exists")`, `hasattr(doc_snap, "to_dict")`, or `getattr(issue, "comments_url")`.

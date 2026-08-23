@@ -29,30 +29,18 @@ class Task(BaseModel):
 
     priority: float = 0.0  # A priority value between 0.0 and 1.0
     priority_needs_updated: bool = True
-    github_issue_ref: firestore.DocumentReference | str | object | None = (
-        None  # Native Firestore DocumentReference, test mock, or resource path
-    )
     github_issue_id: str | None = None  # Direct string key (e.g. owner_repo_number)
+    owner: str | None = None
+    repo: str | None = None
+    issue_number: int | None = None
     uid: str | None = None  # Owner user ID
     id: str | None = None  # Task document ID (e.g. task_{github_issue_id})
     github_issue_title: str | None = None  # Optional cached title copied from GitHub issue
     github_issue_url: str | None = None  # Optional direct URL copied from GitHub issue
     github_issue_upvotes: int = 0  # Number of +1 upvotes / reactions on the GitHub issue
+    association_reasons: list[str] = []
     created_at: datetime | str | object | None = None
     updated_at: datetime | str | object | None = None
-
-    @field_serializer("github_issue_ref", when_used="json")
-    def serialize_issue_ref(self, v: firestore.DocumentReference | str | object | None) -> str | None:
-        if v is None:
-            return None
-        if isinstance(v, str):
-            return v
-        if isinstance(v, firestore.DocumentReference):
-            return str(v.path)
-        ref_path = getattr(v, "path", None)
-        if isinstance(ref_path, str):
-            return ref_path
-        return str(v)
 
     @field_serializer("created_at", "updated_at", when_used="json")
     def serialize_timestamps(self, v: datetime | str | object | None) -> str | None:
@@ -133,7 +121,7 @@ def enqueue_task_ranking(
 
 def ensure_task_for_issue(uid: str, issue_id: str, issue_data: dict[str, object], db: firestore.Client) -> Task:
     """
-    Creates or updates the Task associated with a given issue in Firestore.
+    Creates or updates the Task associated with a given issue in Firestore under users/{uid}/tasks.
     When an issue is modified or created, priority_needs_updated is set to True.
     """
     task_doc_id = f"task_{issue_id}"
@@ -141,13 +129,20 @@ def ensure_task_for_issue(uid: str, issue_id: str, issue_data: dict[str, object]
     task_ref = tasks_col.document(task_doc_id)
     doc_snap = task_ref.get()
 
-    issue_ref = db.collection("users").document(uid).collection("issues").document(issue_id)
     raw_title = issue_data.get("title")
     issue_title = str(raw_title) if raw_title is not None else None
     raw_url = issue_data.get("url")
     issue_url = str(raw_url) if raw_url is not None else None
     raw_upvotes = issue_data.get("upvotes")
     issue_upvotes = int(raw_upvotes) if isinstance(raw_upvotes, int) else 0
+
+    owner = str(issue_data.get("owner")) if issue_data.get("owner") is not None else None
+    repo = str(issue_data.get("repo")) if issue_data.get("repo") is not None else None
+    raw_num = issue_data.get("issue_number") or issue_data.get("number")
+    issue_number = int(raw_num) if isinstance(raw_num, (int, str)) and str(raw_num).isdigit() else None
+
+    raw_reasons = issue_data.get("association_reasons", [])
+    reasons_list: list[str] = [str(r) for r in raw_reasons] if isinstance(raw_reasons, list) else []
 
     if doc_snap.exists:
         raw_dict = doc_snap.to_dict() or {}
@@ -156,19 +151,27 @@ def ensure_task_for_issue(uid: str, issue_id: str, issue_data: dict[str, object]
         task.github_issue_title = issue_title or task.github_issue_title
         task.github_issue_url = issue_url or task.github_issue_url
         task.github_issue_upvotes = issue_upvotes if issue_upvotes > 0 else task.github_issue_upvotes
-        task.github_issue_ref = issue_ref
         task.github_issue_id = issue_id
+        task.owner = owner or task.owner
+        task.repo = repo or task.repo
+        task.issue_number = issue_number or task.issue_number
+        if reasons_list:
+            combined = set(task.association_reasons + reasons_list)
+            task.association_reasons = sorted(list(combined))
     else:
         task = Task(
             id=task_doc_id,
             priority=0.0,
             priority_needs_updated=True,
-            github_issue_ref=issue_ref,
             github_issue_id=issue_id,
+            owner=owner,
+            repo=repo,
+            issue_number=issue_number,
             uid=uid,
             github_issue_title=issue_title,
             github_issue_url=issue_url,
             github_issue_upvotes=issue_upvotes,
+            association_reasons=reasons_list,
         )
 
     task_data = task.model_dump()
@@ -182,7 +185,7 @@ def ensure_task_for_issue(uid: str, issue_id: str, issue_data: dict[str, object]
 def update_task_priority(uid: str, task_id: str, db: firestore.Client) -> dict[str, object]:
     """
     Retrieves a single task from Firestore for a given user, loads its associated
-    GitHub issue (including comments) and the user's github_username, calls the
+    GitHub issue and comments in-memory using the user's github_access_token, calls the
     ranker, and persists the updated priority back to Firestore.
     """
     logger.info(f"[UPDATE_TASK_PRIORITY] Starting update_task_priority: uid={uid}, task_id={task_id}")
@@ -200,40 +203,70 @@ def update_task_priority(uid: str, task_id: str, db: firestore.Client) -> dict[s
         f"github_issue_id='{task.github_issue_id}'"
     )
 
-    # Fetch associated issue and comments from users/{uid}/issues/{issue_id}
-    issue_id = task.github_issue_id or (task_id[5:] if task_id.startswith("task_") else task_id)
-    issue_data: dict[str, object] = {}
-    if issue_id:
-        issue_ref = db.collection("users").document(uid).collection("issues").document(issue_id)
-        issue_snap = issue_ref.get()
-        if issue_snap.exists:
-            issue_data = issue_snap.to_dict() or {}
-            raw_comments = issue_data.get("comments", [])
-            comments_len = len(raw_comments) if isinstance(raw_comments, list) else 0
-            logger.info(f"[UPDATE_TASK_PRIORITY] Found issue doc {issue_id} with {comments_len} comments.")
-        else:
-            logger.warning(f"[UPDATE_TASK_PRIORITY] Issue doc {issue_id} not found in users/{uid}/issues/.")
-
-    # Fetch user profile to get github_username and gemini_api_key
+    # Fetch user profile to get github_access_token, github_username and gemini_api_key
     user_ref = db.collection("users").document(uid)
     user_snap = user_ref.get()
+    github_access_token: str | None = None
     github_username: str | None = None
     gemini_api_key: str | None = None
     if user_snap.exists:
         u_dict = user_snap.to_dict() or {}
+        raw_tok = u_dict.get("github_access_token")
+        github_access_token = str(raw_tok) if raw_tok is not None else None
         raw_u_name = u_dict.get("github_username")
         github_username = str(raw_u_name) if raw_u_name is not None else None
         raw_key = u_dict.get("gemini_api_key")
         gemini_api_key = str(raw_key) if raw_key is not None else None
         logger.info(
             f"[UPDATE_TASK_PRIORITY] User profile loaded: github_username='{github_username}', "
-            f"has_gemini_key={bool(gemini_api_key)}"
+            f"has_token={bool(github_access_token)}, has_gemini_key={bool(gemini_api_key)}"
         )
     else:
         logger.warning(f"[UPDATE_TASK_PRIORITY] User profile document users/{uid} does not exist.")
 
+    # Fetch issue details and comments in-memory via PyGithub
+    from github_sync import IssuePayload, fetch_issue_in_memory
+
+    issue_payload: IssuePayload | dict[str, object] | None = None
+    owner = task.owner
+    repo = task.repo
+    num = task.issue_number
+
+    # Fallback parsing from github_issue_id or github_issue_url if not explicitly set on Task
+    if (not owner or not repo or not num) and task.github_issue_id:
+        parts = task.github_issue_id.rsplit("_", 1)
+        if len(parts) == 2 and parts[1].isdigit():
+            num = int(parts[1])
+            repo_parts = parts[0].split("_", 1)
+            if len(repo_parts) == 2:
+                owner, repo = repo_parts[0], repo_parts[1]
+
+    if github_access_token and owner and repo and num:
+        try:
+            issue_payload = fetch_issue_in_memory(
+                access_token=github_access_token,
+                owner=owner,
+                repo=repo,
+                issue_number=num,
+            )
+            comments_len = len(issue_payload.comments)
+            logger.info(
+                f"[UPDATE_TASK_PRIORITY] Fetched in-memory issue {owner}/{repo}#{num} with {comments_len} comments."
+            )
+        except Exception as e:
+            logger.warning(f"[UPDATE_TASK_PRIORITY] Error fetching in-memory issue data for {owner}/{repo}#{num}: {e}")
+
+    # If in-memory fetch wasn't available, provide basic fallback dict from task cached fields
+    if not issue_payload:
+        issue_payload = {
+            "title": task.github_issue_title,
+            "url": task.github_issue_url,
+            "upvotes": task.github_issue_upvotes,
+            "comments": [],
+        }
+
     ranked_task = run_ranker(
-        task=task, issue=issue_data, github_username=github_username, gemini_api_key=gemini_api_key
+        task=task, issue=issue_payload, github_username=github_username, gemini_api_key=gemini_api_key
     )
 
     update_payload = {

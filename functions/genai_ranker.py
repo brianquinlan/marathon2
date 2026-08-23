@@ -5,6 +5,7 @@ Evaluates individual tasks with GitHub issue metadata, comments, and username me
 
 from __future__ import annotations
 
+import json
 import logging
 import os
 import random
@@ -89,7 +90,7 @@ def get_pydantic_ai_agent(
 
 def run_ranker(
     task: TTask,
-    issue: dict[str, object] | None = None,
+    issue: BaseModel | dict[str, object] | None = None,
     github_username: str | None = None,
     gemini_api_key: str | None = None,
     agent: Agent[None, TaskPriorityOutput] | None = None,
@@ -98,7 +99,7 @@ def run_ranker(
     """
     Ranker engine that computes priority for a single task using Pydantic AI
     and the latest Gemini Flash model ('gemini-3.7-flash').
-    Takes the GitHub issue metadata, comments, the current user's GitHub username,
+    Accepts full structured issue and comments JSON, the current user's GitHub username,
     and the user's Gemini API key.
     """
     logger.info(
@@ -113,57 +114,25 @@ def run_ranker(
             f"Please set a Gemini API key in user settings or GEMINI_API_KEY in environment."
         )
 
-    issue_data = issue or {}
-    raw_comments = issue_data.get("comments")
-    comments: list[object] = raw_comments if isinstance(raw_comments, list) else []
+    # Serialize issue and comment data to JSON directly for the LLM
+    if isinstance(issue, BaseModel):
+        issue_json_str = issue.model_dump_json(indent=2)
+    elif isinstance(issue, dict):
+        issue_json_str = json.dumps(issue, indent=2, default=str)
+    else:
+        issue_json_str = "{}"
 
-    # Construct prompt context
     user_info_str = f"@{github_username}" if github_username else "Unknown (not specified)"
 
-    comments_text_list: list[str] = []
-    for idx, c in enumerate(comments, 1):
-        if isinstance(c, dict):
-            c_author = c.get("user_login") or "unknown"
-            c_body = c.get("body") or ""
-            c_time = c.get("created_at") or ""
-            comments_text_list.append(f"Comment {idx} by @{c_author} ({c_time}):\n{c_body}")
-        elif isinstance(c, str):
-            comments_text_list.append(f"Comment {idx}:\n{c}")
-
-    comments_formatted = "\n\n".join(comments_text_list) if comments_text_list else "No comments on this issue."
-
-    issue_title = issue_data.get("title") or task.github_issue_title or "Untitled Issue"
-    issue_body = issue_data.get("body") or "No issue description provided."
-    issue_state = issue_data.get("state") or "open"
-    issue_author = issue_data.get("user") or "unknown"
-    issue_labels = issue_data.get("labels") or []
-    issue_assignees = issue_data.get("assignees") or []
-    raw_upvotes = issue_data.get("upvotes")
-    issue_upvotes = int(raw_upvotes) if isinstance(raw_upvotes, int) else task.github_issue_upvotes
-
-    logger.info(
-        f"[RANKER] Issue details for {task.doc_id}: title='{issue_title}', state='{issue_state}', "
-        f"author='{issue_author}', upvotes={issue_upvotes}, comments_count={len(comments)}"
-    )
+    logger.info(f"[RANKER] Issue payload for {task.doc_id}: JSON length={len(issue_json_str)} characters")
 
     prompt_text = f"""
 Current User GitHub Username: {user_info_str}
 
-GitHub Issue Details:
-- Title: {issue_title}
-- State: {issue_state}
-- Author: @{issue_author}
-- Assignees: {issue_assignees}
-- Labels: {issue_labels}
-- Upvotes (+1 reactions): {issue_upvotes}
+GitHub Issue & Comments Data (JSON):
+{issue_json_str}
 
-Issue Description:
-{issue_body}
-
-Chronological Comments ({len(comments)} comments):
-{comments_formatted}
-
-Please evaluate the priority for the user {user_info_str} and assign a priority score between 0.0 and 1.0.
+Please evaluate the priority for the user {user_info_str} based on your system instructions and assign a priority score between 0.0 and 1.0.
 """.strip()
 
     active_agent = agent or get_pydantic_ai_agent(api_key=gemini_api_key, system_prompt=DEFAULT_SYSTEM_PROMPT)

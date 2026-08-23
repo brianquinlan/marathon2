@@ -19,6 +19,7 @@ from genai_ranker import (
     TaskPriorityOutput,
     run_ranker,
 )
+from github_sync import IssuePayload
 from task import (
     Task,
     enqueue_task_ranking,
@@ -83,25 +84,24 @@ class TestTaskModel(unittest.TestCase):
         self.assertTrue(reconstructed.priority_needs_updated)
         self.assertEqual(reconstructed.github_issue_upvotes, 42)
 
-    def test_task_with_firestore_document_reference(self):
-        class FakeDocRef:
-            path = "users/user_123/issues/owner_repo_1"
+    def test_task_owner_repo_issue_number_fields(self):
+        task = Task(
+            github_issue_id="dart-lang_http_1956",
+            owner="dart-lang",
+            repo="http",
+            issue_number=1956,
+            uid="user_123",
+            association_reasons=["assigned", "mentioned"],
+        )
+        self.assertEqual(task.doc_id, "task_dart-lang_http_1956")
+        self.assertEqual(task.owner, "dart-lang")
+        self.assertEqual(task.repo, "http")
+        self.assertEqual(task.issue_number, 1956)
+        self.assertEqual(task.association_reasons, ["assigned", "mentioned"])
 
-        mock_ref = FakeDocRef()
-
-        task = Task(github_issue_id="owner_repo_1", github_issue_ref=mock_ref, uid="user_123")
-        self.assertEqual(task.doc_id, "task_owner_repo_1")
-
-        d_dump = task.model_dump()
-        self.assertIn("github_issue_ref", d_dump)
-        self.assertEqual(d_dump["github_issue_ref"], mock_ref)
-
-        # Test JSON serialization mode
-        json_dump = task.model_dump(mode="json")
-        self.assertEqual(json_dump["github_issue_ref"], "users/user_123/issues/owner_repo_1")
-
-        json_str = task.model_dump_json()
-        self.assertIn('"github_issue_ref":"users/user_123/issues/owner_repo_1"', json_str.replace(" ", ""))
+        dumped = task.model_dump()
+        self.assertEqual(dumped["owner"], "dart-lang")
+        self.assertEqual(dumped["issue_number"], 1956)
 
 
 class TestRankerEngine(unittest.TestCase):
@@ -117,7 +117,7 @@ class TestRankerEngine(unittest.TestCase):
             self.assertIn("@brian", user_prompt)
             self.assertIn("Critical Blocker", user_prompt)
             self.assertIn("Hey @brian please check this ASAP", user_prompt)
-            self.assertIn("Upvotes (+1 reactions): 18", user_prompt)
+            self.assertIn("18", user_prompt)
             return mock_res
 
         mock_agent.run_sync.side_effect = fake_run_sync
@@ -243,50 +243,45 @@ class TestTaskFirestoreOperations(unittest.TestCase):
         self.assertEqual(updated_task.priority, 0.7)
         mock_task_ref.set.assert_called_once()
 
+    @patch("github_sync.fetch_issue_in_memory")
     @patch("task.run_ranker")
-    def test_update_task_priority(self, mock_run_ranker):
+    def test_update_task_priority(self, mock_run_ranker, mock_fetch_in_memory):
         mock_db = MagicMock()
         mock_user_doc = MagicMock()
         mock_tasks_col = MagicMock()
-        mock_issues_col = MagicMock()
         mock_task_ref = MagicMock()
-        mock_issue_ref = MagicMock()
 
         mock_task_snap = MagicMock()
         mock_task_snap.exists = True
         mock_task_snap.to_dict.return_value = {
             "id": "task_issue_10",
             "github_issue_id": "org_repo_10",
+            "owner": "org",
+            "repo": "repo",
+            "issue_number": 10,
             "priority": 0.0,
             "priority_needs_updated": True,
             "github_issue_title": "Needs rank",
         }
         mock_task_ref.get.return_value = mock_task_snap
 
-        mock_issue_snap = MagicMock()
-        mock_issue_snap.exists = True
-        mock_issue_snap.to_dict.return_value = {
-            "title": "Issue 10",
-            "body": "Description",
-            "comments": [{"user_login": "bob", "body": "Comment text"}],
-        }
-        mock_issue_ref.get.return_value = mock_issue_snap
+        mock_in_memory_issue = IssuePayload(
+            issue={"title": "Issue 10", "body": "Description"},
+            comments=[{"user": {"login": "bob"}, "body": "Comment text"}],
+        )
+        mock_fetch_in_memory.return_value = mock_in_memory_issue
 
         mock_user_snap = MagicMock()
         mock_user_snap.exists = True
-        mock_user_snap.to_dict.return_value = {"github_username": "brian_dev", "gemini_api_key": "AIzaSyUserDocKey"}
+        mock_user_snap.to_dict.return_value = {
+            "github_username": "brian_dev",
+            "github_access_token": "ghp_valid_token_123",
+            "gemini_api_key": "AIzaSyUserDocKey",
+        }
         mock_user_doc.get.return_value = mock_user_snap
 
-        def col_side_effect(name):
-            if name == "tasks":
-                return mock_tasks_col
-            elif name == "issues":
-                return mock_issues_col
-            return MagicMock()
-
-        mock_user_doc.collection.side_effect = col_side_effect
+        mock_user_doc.collection.return_value = mock_tasks_col
         mock_tasks_col.document.return_value = mock_task_ref
-        mock_issues_col.document.return_value = mock_issue_ref
         mock_db.collection.return_value.document.return_value = mock_user_doc
 
         ranked_mock_task = Task(
@@ -298,11 +293,17 @@ class TestTaskFirestoreOperations(unittest.TestCase):
         self.assertEqual(result["status"], "success")
         self.assertEqual(result["task_id"], "task_issue_10")
         self.assertEqual(result["priority"], 0.88)
+        mock_fetch_in_memory.assert_called_once_with(
+            access_token="ghp_valid_token_123",
+            owner="org",
+            repo="repo",
+            issue_number=10,
+        )
         mock_run_ranker.assert_called_once()
         _args, kwargs = mock_run_ranker.call_args
         self.assertEqual(kwargs.get("github_username"), "brian_dev")
         self.assertEqual(kwargs.get("gemini_api_key"), "AIzaSyUserDocKey")
-        self.assertEqual(kwargs.get("issue"), mock_issue_snap.to_dict.return_value)
+        self.assertEqual(kwargs.get("issue"), mock_in_memory_issue)
         mock_task_ref.set.assert_called_once()
 
     def test_force_rerank_tasks_marks(self):

@@ -12,7 +12,6 @@ from firebase_functions import https_fn, tasks_fn
 
 import main
 from auth_utils import extract_provider_info
-from github_sync import Comment
 from user import User
 
 
@@ -183,13 +182,10 @@ class TestCallableFunctionLogic(unittest.TestCase):
 
 class TestTaskQueueSyncHandlers(unittest.TestCase):
     @patch("github_sync.enqueue_issue_page_sync")
-    @patch("github_sync.enqueue_comment_page_sync")
     @patch("github_sync.process_and_save_issue_page")
     @patch("github_sync.fetch_single_issue_page")
     @patch("main.db")
-    def test_sync_github_issues_page_handler(
-        self, mock_db, mock_fetch_page, mock_save_page, mock_enqueue_comment, mock_enqueue_issue
-    ):
+    def test_sync_github_issues_page_handler(self, mock_db, mock_fetch_page, mock_save_page, mock_enqueue_issue):
         handler = get_callable_handler(main.sync_github_issues_page)
 
         mock_doc_ref = MagicMock()
@@ -220,43 +216,7 @@ class TestTaskQueueSyncHandlers(unittest.TestCase):
         self.assertEqual(result["status"], "success")
         self.assertEqual(result["saved_count"], 1)
         self.assertEqual(result["next_url"], "https://api.github.com/issues?page=2")
-        mock_enqueue_comment.assert_called_once()
         mock_enqueue_issue.assert_called_once()
-
-    @patch("github_sync.enqueue_comment_page_sync")
-    @patch("github_sync.process_and_save_comment_page")
-    @patch("github_sync.fetch_single_comment_page")
-    @patch("main.db")
-    def test_sync_issue_comments_page_handler(
-        self, mock_db, mock_fetch_comments, mock_save_comments, mock_enqueue_next_comments
-    ):
-        handler = get_callable_handler(main.sync_issue_comments_page)
-
-        mock_doc_ref = MagicMock()
-        mock_doc_snap = MagicMock()
-        mock_doc_snap.exists = True
-        mock_doc_snap.to_dict.return_value = {"uid": "user_q_2", "github_access_token": "gho_token_q2"}
-        mock_doc_ref.get.return_value = mock_doc_snap
-        mock_db.collection.return_value.document.return_value = mock_doc_ref
-
-        mock_fetch_comments.return_value = (
-            [Comment(id=1, user_login="alice", body="Test")],
-            "https://api.github.com/comments?page=2",
-        )
-        mock_save_comments.return_value = 1
-
-        mock_req = MagicMock(spec=tasks_fn.CallableRequest)
-        mock_req.data = {
-            "uid": "user_q_2",
-            "issue_doc_id": "o_r_100",
-            "comments_url": "https://api.github.com/comments",
-        }
-
-        result = handler(mock_req)
-        assert isinstance(result, dict)
-        self.assertEqual(result["status"], "success")
-        self.assertEqual(result["saved_comments_count"], 1)
-        mock_enqueue_next_comments.assert_called_once()
 
 
 class TestScheduledFunctions(unittest.TestCase):

@@ -17,13 +17,13 @@ from github_sync import (
     AssociationReason,
     Comment,
     Issue,
+    IssuePayload,
     IssueType,
     comment_from_pygithub,
     fetch_github_user_login,
-    fetch_single_comment_page,
+    fetch_issue_in_memory,
     fetch_single_issue_page,
     issue_from_pygithub,
-    process_and_save_comment_page,
     process_and_save_issue_page,
     start_user_github_sync,
     sync_closed_issues_for_user,
@@ -168,131 +168,86 @@ class TestSinglePageFetchingAndPagination(unittest.TestCase):
         self.assertEqual(items[0]["number"], 1)
         self.assertEqual(next_url, "https://api.github.com/issues?page=1")
 
-    @patch("github_sync.fetch_single_comment_page_pygithub")
+
+class TestFetchIssueInMemory(unittest.TestCase):
     @patch("github_sync.get_github_client")
-    def test_fetch_single_comment_page_with_next_link(self, mock_get_client, mock_fetch_pygh):
+    def test_fetch_issue_in_memory_structured_payload(self, mock_get_client):
         mock_client = MagicMock()
+        mock_repo = MagicMock()
+        mock_issue = MagicMock()
         mock_get_client.return_value = mock_client
+        mock_client.get_repo.return_value = mock_repo
+        mock_repo.get_issue.return_value = mock_issue
 
-        mock_comment = Comment(
-            id=501,
-            user_login="reviewer",
-            body="Looks good",
-            created_at=datetime(2026, 8, 22, 10, 0, tzinfo=timezone.utc),
+        mock_issue.raw_data = {
+            "title": "Critical Performance Issue",
+            "number": 42,
+            "state": "open",
+            "html_url": "https://github.com/dart-lang/http/issues/42",
+            "user": {"login": "contributor1"},
+            "assignees": [{"login": "brianquinlan"}],
+            "labels": [{"name": "bug"}, {"name": "p1"}],
+            "reactions": {"+1": 7},
+        }
+
+        mock_comment1 = MagicMock()
+        mock_comment1.raw_data = {
+            "id": 901,
+            "user": {"login": "maintainer"},
+            "body": "Working on a fix.",
+            "created_at": "2026-08-22T10:00:00Z",
+        }
+        mock_issue.get_comments.return_value = [mock_comment1]
+
+        data = fetch_issue_in_memory(
+            access_token="ghp_test_token",
+            owner="dart-lang",
+            repo="http",
+            issue_number=42,
+            client=mock_client,
         )
-        mock_fetch_pygh.return_value = ([mock_comment], True)
 
-        comments, next_url = fetch_single_comment_page(
-            "https://api.github.com/repos/org/repo/issues/10/comments",
-            headers={"Authorization": "Bearer test"},
-            params={"page": 0, "per_page": 100},
-        )
-        self.assertEqual(len(comments), 1)
-        self.assertEqual(comments[0].id, 501)
-        self.assertEqual(next_url, "https://api.github.com/repos/org/repo/issues/10/comments?page=1")
+        self.assertIsInstance(data, IssuePayload)
+        self.assertEqual(data.issue["title"], "Critical Performance Issue")
+        self.assertEqual(data.issue["number"], 42)
+        self.assertEqual(len(data.comments), 1)
+        self.assertEqual(data.comments[0]["body"], "Working on a fix.")
 
 
-class TestPageProcessingAndTaskCreationTiming(unittest.TestCase):
-    def test_process_and_save_issue_page_with_comments_does_not_create_task_yet(self):
+class TestPageProcessingAndDirectTaskCreation(unittest.TestCase):
+    def test_process_and_save_issue_page_creates_tasks_directly(self):
         mock_db = MagicMock()
-        mock_user_doc = MagicMock()
-        mock_issues_col = MagicMock()
-        mock_issue_ref = MagicMock()
-        mock_doc_snap = MagicMock()
-        mock_doc_snap.exists = False
-        mock_issue_ref.get.return_value = mock_doc_snap
-
-        mock_db.collection.return_value.document.return_value = mock_user_doc
-        mock_user_doc.collection.return_value = mock_issues_col
-        mock_issues_col.document.return_value = mock_issue_ref
 
         raw_items = [
             {
                 "number": 10,
-                "title": "Bug fix",
+                "title": "Bug fix issue",
                 "html_url": "https://github.com/org/repo/issues/10",
                 "repository": {"owner": {"login": "org"}, "name": "repo"},
                 "user": {"login": "author"},
-                "comments": 5,  # Has 5 comments to fetch
-                "comments_url": "https://api.github.com/repos/org/repo/issues/10/comments",
-            }
-        ]
-
-        with patch("github_sync.ensure_task_for_issue") as mock_ensure_task:
-            saved_ids = process_and_save_issue_page(uid="user_123", raw_items=raw_items, reason="assigned", db=mock_db)
-            self.assertEqual(saved_ids, ["org_repo_10"])
-            mock_issue_ref.set.assert_called_once()
-            # Task must NOT be created yet because comments are still pending!
-            mock_ensure_task.assert_not_called()
-
-    def test_process_and_save_issue_page_with_zero_comments_creates_task_immediately(self):
-        mock_db = MagicMock()
-        mock_user_doc = MagicMock()
-        mock_issues_col = MagicMock()
-        mock_issue_ref = MagicMock()
-        mock_doc_snap = MagicMock()
-        mock_doc_snap.exists = False
-        mock_issue_ref.get.return_value = mock_doc_snap
-
-        mock_db.collection.return_value.document.return_value = mock_user_doc
-        mock_user_doc.collection.return_value = mock_issues_col
-        mock_issues_col.document.return_value = mock_issue_ref
-
-        raw_items = [
+                "comments": 5,
+                "reactions": {"+1": 3},
+            },
             {
                 "number": 11,
-                "title": "Zero comments issue",
+                "title": "Feature request",
                 "html_url": "https://github.com/org/repo/issues/11",
                 "repository": {"owner": {"login": "org"}, "name": "repo"},
-                "user": {"login": "author"},
-                "comments": 0,  # Zero comments
-                "comments_url": "https://api.github.com/repos/org/repo/issues/11/comments",
-            }
+                "user": {"login": "author2"},
+                "comments": 0,
+                "reactions": {"+1": 0},
+            },
         ]
 
         with patch("github_sync.ensure_task_for_issue") as mock_ensure_task:
             saved_ids = process_and_save_issue_page(uid="user_123", raw_items=raw_items, reason="assigned", db=mock_db)
-            self.assertEqual(saved_ids, ["org_repo_11"])
-            mock_issue_ref.set.assert_called_once()
-            # Task is created immediately because all (0) comments are imported
-            mock_ensure_task.assert_called_once()
-
-    def test_process_and_save_comment_page_creates_task_only_on_last_page(self):
-        mock_db = MagicMock()
-        mock_user_doc = MagicMock()
-        mock_issues_col = MagicMock()
-        mock_issue_ref = MagicMock()
-        mock_doc_snap = MagicMock()
-
-        mock_doc_snap.exists = True
-        mock_doc_snap.to_dict.return_value = {
-            "title": "Issue with comments",
-            "comments": [{"id": 1, "user_login": "u1", "body": "c1"}],
-        }
-        mock_issue_ref.get.return_value = mock_doc_snap
-
-        mock_db.collection.return_value.document.return_value = mock_user_doc
-        mock_user_doc.collection.return_value = mock_issues_col
-        mock_issues_col.document.return_value = mock_issue_ref
-
-        new_comments = [
-            Comment(id=2, user_login="u2", body="c2", created_at=datetime(2026, 8, 22, 10, 0, tzinfo=timezone.utc))
-        ]
-
-        with patch("github_sync.ensure_task_for_issue") as mock_ensure_task:
-            # Intermediate comment page (is_last_page=False)
-            saved_count = process_and_save_comment_page(
-                uid="user_123", issue_doc_id="org_repo_10", new_comments=new_comments, db=mock_db, is_last_page=False
-            )
-            self.assertEqual(saved_count, 1)
-            mock_ensure_task.assert_not_called()
-
-            # Final comment page (is_last_page=True) -> Task created!
-            saved_count2 = process_and_save_comment_page(
-                uid="user_123", issue_doc_id="org_repo_10", new_comments=new_comments, db=mock_db, is_last_page=True
-            )
-            self.assertEqual(saved_count2, 1)
-            mock_ensure_task.assert_called_once()
+            self.assertEqual(saved_ids, ["org_repo_10", "org_repo_11"])
+            self.assertEqual(mock_ensure_task.call_count, 2)
+            # Verify ensure_task_for_issue was called with correct payload
+            call1_args = mock_ensure_task.call_args_list[0][1]
+            self.assertEqual(call1_args["issue_id"], "org_repo_10")
+            self.assertEqual(call1_args["issue_data"]["title"], "Bug fix issue")
+            self.assertEqual(call1_args["issue_data"]["upvotes"], 3)
 
 
 class TestInitialSyncDispatcher(unittest.TestCase):
@@ -358,16 +313,10 @@ class TestGitHubUserLoginDiscovery(unittest.TestCase):
 
 class TestClosedIssuesSync(unittest.TestCase):
     @patch("github_sync.fetch_single_issue_page")
-    def test_sync_closed_issues_for_user_deletes_tasks_and_updates_issue(self, mock_fetch):
+    def test_sync_closed_issues_for_user_deletes_tasks(self, mock_fetch):
         mock_db = MagicMock()
         mock_user_doc = MagicMock()
-        mock_issues_col = MagicMock()
         mock_tasks_col = MagicMock()
-
-        mock_issue_ref = MagicMock()
-        mock_issue_snap = MagicMock()
-        mock_issue_snap.exists = True
-        mock_issue_ref.get.return_value = mock_issue_snap
 
         mock_task_ref = MagicMock()
         mock_task_snap = MagicMock()
@@ -375,10 +324,7 @@ class TestClosedIssuesSync(unittest.TestCase):
         mock_task_ref.get.return_value = mock_task_snap
 
         mock_db.collection.return_value.document.return_value = mock_user_doc
-        mock_user_doc.collection.side_effect = lambda col_name: (
-            mock_issues_col if col_name == "issues" else mock_tasks_col
-        )
-        mock_issues_col.document.return_value = mock_issue_ref
+        mock_user_doc.collection.return_value = mock_tasks_col
         mock_tasks_col.document.return_value = mock_task_ref
 
         # Return 1 closed issue from GitHub
@@ -401,7 +347,6 @@ class TestClosedIssuesSync(unittest.TestCase):
 
         self.assertEqual(res["status"], "success")
         self.assertEqual(res["closed_issues_count"], 1)
-        mock_issue_ref.set.assert_called_with({"state": "closed", "updated_at": ANY}, merge=True)
         mock_task_ref.delete.assert_called_once()
 
 
