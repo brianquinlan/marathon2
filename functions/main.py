@@ -607,36 +607,6 @@ def rank_user_tasks(req: tasks_fn.CallableRequest) -> Dict[str, Any]:
 @https_fn.on_call(
     cors=options.CorsOptions(cors_origins="*", cors_methods=["get", "post", "options"])
 )
-def update_task_priorities(req: https_fn.CallableRequest) -> Dict[str, Any]:
-    """
-    Enqueues an asynchronous task in the Firebase Task Queue to update priorities.
-    """
-    if not req.auth:
-        raise https_fn.HttpsError(
-            code=https_fn.FunctionsErrorCode.UNAUTHENTICATED,
-            message="User must be authenticated to update task priorities."
-        )
-
-    uid = req.auth.uid
-    try:
-        enqueue_res = enqueue_task_ranking(uid=uid, db=db)
-        return {
-            "status": "enqueued",
-            "message": "Task priority ranking enqueued asynchronously.",
-            "uid": uid,
-            "enqueue_info": enqueue_res,
-        }
-    except Exception as e:
-        logger.error(f"Error enqueuing task priorities update for UID {uid}: {e}")
-        raise https_fn.HttpsError(
-            code=https_fn.FunctionsErrorCode.INTERNAL,
-            message=f"Failed to enqueue task priority update: {str(e)}"
-        )
-
-
-@https_fn.on_call(
-    cors=options.CorsOptions(cors_origins="*", cors_methods=["get", "post", "options"])
-)
 def force_rerank_all_tasks(req: https_fn.CallableRequest) -> Dict[str, Any]:
     """
     Forces all tasks for the authenticated user to be reranked:
@@ -857,6 +827,54 @@ def on_user_settings_changed(
         )
         user = User.model_validate({**after_data, "uid": uid})
         start_user_github_sync(user=user, db=db, state="open")
+
+
+# ============================================================================
+# Cloud Firestore Triggers: Task Document Changes & Reranking
+# ============================================================================
+
+@firestore_fn.on_document_written(document="users/{uid}/tasks/{task_id}")
+def on_task_written(
+    event: firestore_fn.Event[firestore_fn.Change[firestore_fn.DocumentSnapshot | None]]
+) -> None:
+    """
+    Cloud Firestore trigger that monitors for changes to Task documents and triggers reranking
+    whenever a task is newly created or updated with priority_needs_updated == True.
+    """
+    if event.data is None or event.data.after is None:
+        logger.info("Task document was deleted; skipping rerank trigger.")
+        return
+
+    after_snap = event.data.after
+    before_snap = event.data.before
+
+    # If document does not exist after write, do nothing
+    if hasattr(after_snap, "exists") and not after_snap.exists:
+        logger.info("Task document does not exist after write; skipping.")
+        return
+
+    after_data = after_snap.to_dict() or {}
+    after_needs_update = after_data.get("priority_needs_updated", False)
+
+    # Only trigger reranking if priority_needs_updated is True (prevents loop when ranker sets it to False)
+    if not after_needs_update:
+        return
+
+    is_new = (before_snap is None) or (hasattr(before_snap, "exists") and not before_snap.exists)
+    before_data = {}
+    if not is_new and before_snap is not None:
+        before_data = before_snap.to_dict() or {}
+    before_needs_update = before_data.get("priority_needs_updated", False)
+
+    if is_new or (after_needs_update and not before_needs_update) or after_needs_update:
+        uid = event.params.get("uid")
+        task_id = event.params.get("task_id")
+        logger.info(
+            f"Task document changed with priority_needs_updated=True for UID {uid}, task {task_id}. "
+            f"Triggering asynchronous task reranking."
+        )
+        enqueue_task_ranking(uid=uid, function_name="rank_user_tasks", db=db)
+
 
 
 

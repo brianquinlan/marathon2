@@ -170,24 +170,6 @@ class TestCallableFunctionLogic(unittest.TestCase):
         self.assertEqual(result["status"], "enqueued")
         self.assertEqual(result["initial_queues_count"], 4)
 
-    @patch("main.enqueue_task_ranking")
-    @patch("main.db")
-    def test_update_task_priorities_callable(self, mock_db, mock_enqueue_fn):
-        handler = get_callable_handler(main.update_task_priorities)
-        mock_enqueue_fn.return_value = {
-            "status": "enqueued",
-            "uid": "user_rank_001",
-            "mode": "async_dispatched"
-        }
-
-        mock_req = MagicMock(spec=https_fn.CallableRequest)
-        mock_req.auth = MagicMock()
-        mock_req.auth.uid = "user_rank_001"
-
-        result = handler(mock_req)
-        self.assertEqual(result["status"], "enqueued")
-        mock_enqueue_fn.assert_called_once_with(uid="user_rank_001", db=mock_db)
-
     @patch("main.force_rerank_tasks")
     @patch("main.db")
     def test_force_rerank_all_tasks_callable(self, mock_db, mock_force_fn):
@@ -606,6 +588,110 @@ class TestFirestoreUserSettingsTrigger(unittest.TestCase):
 
         handler(mock_event)
         mock_start_sync.assert_not_called()
+
+
+class TestFirestoreTaskTrigger(unittest.TestCase):
+
+    @patch("main.enqueue_task_ranking")
+    @patch("main.db")
+    def test_task_trigger_invoked_when_new_task_created_with_needs_update(self, mock_db, mock_enqueue_ranking):
+        handler = get_callable_handler(main.on_task_written)
+
+        mock_event = MagicMock()
+        mock_event.params = {"uid": "user_task_trig_1", "task_id": "task_issue_1"}
+
+        mock_after = MagicMock()
+        mock_after.to_dict.return_value = {
+            "id": "task_issue_1",
+            "priority": 0.0,
+            "priority_needs_updated": True,
+            "title": "Bugfix issue"
+        }
+
+        mock_event.data.before = None
+        mock_event.data.after = mock_after
+
+        handler(mock_event)
+        mock_enqueue_ranking.assert_called_once_with(
+            uid="user_task_trig_1",
+            function_name="rank_user_tasks",
+            db=mock_db
+        )
+
+    @patch("main.enqueue_task_ranking")
+    @patch("main.db")
+    def test_task_trigger_invoked_when_task_updated_to_needs_update(self, mock_db, mock_enqueue_ranking):
+        handler = get_callable_handler(main.on_task_written)
+
+        mock_event = MagicMock()
+        mock_event.params = {"uid": "user_task_trig_2", "task_id": "task_issue_2"}
+
+        mock_before = MagicMock()
+        mock_before.to_dict.return_value = {
+            "id": "task_issue_2",
+            "priority": 0.7,
+            "priority_needs_updated": False,
+        }
+
+        mock_after = MagicMock()
+        mock_after.to_dict.return_value = {
+            "id": "task_issue_2",
+            "priority": 0.7,
+            "priority_needs_updated": True,
+        }
+
+        mock_event.data.before = mock_before
+        mock_event.data.after = mock_after
+
+        handler(mock_event)
+        mock_enqueue_ranking.assert_called_once_with(
+            uid="user_task_trig_2",
+            function_name="rank_user_tasks",
+            db=mock_db
+        )
+
+    @patch("main.enqueue_task_ranking")
+    @patch("main.db")
+    def test_task_trigger_skipped_when_priority_needs_updated_is_false(self, mock_db, mock_enqueue_ranking):
+        """Ensures loop prevention when ranker updates tasks and sets priority_needs_updated=False."""
+        handler = get_callable_handler(main.on_task_written)
+
+        mock_event = MagicMock()
+        mock_event.params = {"uid": "user_task_trig_3", "task_id": "task_issue_3"}
+
+        mock_before = MagicMock()
+        mock_before.to_dict.return_value = {
+            "id": "task_issue_3",
+            "priority": 0.0,
+            "priority_needs_updated": True,
+        }
+
+        # Ranker just finished and saved priority=0.85, priority_needs_updated=False
+        mock_after = MagicMock()
+        mock_after.to_dict.return_value = {
+            "id": "task_issue_3",
+            "priority": 0.85,
+            "priority_needs_updated": False,
+        }
+
+        mock_event.data.before = mock_before
+        mock_event.data.after = mock_after
+
+        handler(mock_event)
+        mock_enqueue_ranking.assert_not_called()
+
+    @patch("main.enqueue_task_ranking")
+    @patch("main.db")
+    def test_task_trigger_skipped_when_task_deleted(self, mock_db, mock_enqueue_ranking):
+        handler = get_callable_handler(main.on_task_written)
+
+        mock_event = MagicMock()
+        mock_event.params = {"uid": "user_task_trig_4", "task_id": "task_issue_4"}
+        mock_event.data.before = MagicMock()
+        mock_event.data.after = None
+
+        handler(mock_event)
+        mock_enqueue_ranking.assert_not_called()
 
 
 if __name__ == "__main__":
