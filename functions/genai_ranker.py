@@ -164,34 +164,27 @@ Chronological Comments ({len(comments)} comments):
 Please evaluate the priority for the user {user_info_str} and assign a priority score between 0.0 and 1.0.
 """.strip()
 
-    try:
-        active_agent = agent or get_pydantic_ai_agent(api_key=gemini_api_key, system_prompt=DEFAULT_SYSTEM_PROMPT)
-        logger.info(f"[RANKER] Executing synchronous run_sync with Pydantic AI for task {task.doc_id}...")
+    active_agent = agent or get_pydantic_ai_agent(api_key=gemini_api_key, system_prompt=DEFAULT_SYSTEM_PROMPT)
+    logger.info(f"[RANKER] Executing synchronous run_sync with Pydantic AI for task {task.doc_id}...")
 
-        result = active_agent.run_sync(user_prompt=prompt_text)
-        logger.info(f"[RANKER] Pydantic AI call succeeded for {task.doc_id}. Output: {result.output}")
+    result = active_agent.run_sync(user_prompt=prompt_text)
+    logger.info(f"[RANKER] Pydantic AI call succeeded for {task.doc_id}. Output: {result.output}")
 
-        computed_priority = 0.5
-        output_obj = result.output
-        if output_obj is not None:
-            if isinstance(output_obj, TaskPriorityOutput):
-                computed_priority = output_obj.priority
-                logger.info(
-                    f"[RANKER] Parsed TaskPriorityOutput: priority={computed_priority}, reasoning='{output_obj.reasoning}'"
-                )
-            elif isinstance(output_obj, dict):
-                computed_priority = float(output_obj.get("priority", 0.5))
-                logger.info(f"[RANKER] Parsed dict output: priority={computed_priority}")
+    computed_priority = 0.5
+    output_obj = result.output
+    if output_obj is not None:
+        if isinstance(output_obj, TaskPriorityOutput):
+            computed_priority = output_obj.priority
+            logger.info(
+                f"[RANKER] Parsed TaskPriorityOutput: priority={computed_priority}, reasoning='{output_obj.reasoning}'"
+            )
+        elif isinstance(output_obj, dict):
+            computed_priority = float(output_obj.get("priority", 0.5))
+            logger.info(f"[RANKER] Parsed dict output: priority={computed_priority}")
 
-        computed_priority = max(0.0, min(1.0, float(computed_priority)))
-        task.priority = computed_priority
-        logger.info(f"[RANKER] Successfully assigned priority {task.priority:.2f} to task {task.doc_id}")
-
-    except Exception as e:
-        logger.error(
-            f"[RANKER] Error running Pydantic AI ranker for task {task.doc_id}: {e}. Preserving existing priority {task.priority}.",
-            exc_info=True,
-        )
+    computed_priority = max(0.0, min(1.0, float(computed_priority)))
+    task.priority = computed_priority
+    logger.info(f"[RANKER] Successfully assigned priority {task.priority:.2f} to task {task.doc_id}")
 
     task.priority_needs_updated = False
     return task

@@ -163,15 +163,13 @@ class TestRankerEngine(unittest.TestCase):
         mock_provider_cls.assert_called_with(api_key="custom_key_12345")
         self.assertEqual(agent, mock_agent_instance)
 
-    def test_run_ranker_fallback_on_error(self):
+    def test_run_ranker_raises_on_error(self):
         mock_agent = MagicMock()
         mock_agent.run_sync.side_effect = RuntimeError("API quota exceeded or network error")
 
         task = Task(id="task_err", priority=0.65, priority_needs_updated=True)
-        ranked = run_ranker(task=task, gemini_api_key="bad_key", agent=mock_agent)
-        # Priority should be preserved and priority_needs_updated reset to False
-        self.assertEqual(ranked.priority, 0.65)
-        self.assertFalse(ranked.priority_needs_updated)
+        with self.assertRaises(RuntimeError):
+            run_ranker(task=task, gemini_api_key="bad_key", agent=mock_agent)
 
 
 class TestTaskFirestoreOperations(unittest.TestCase):
