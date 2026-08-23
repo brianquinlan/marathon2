@@ -16,6 +16,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "functions"))
 from github import (
     Issue,
     IssueType,
+    AssociationReason,
     Comment,
     fetch_single_issue_page,
     fetch_single_comment_page,
@@ -69,16 +70,18 @@ class TestGitHubDataStructures(unittest.TestCase):
             assignee_logins=["brianquinlan"],
             created_at=datetime(2026, 8, 22, 9, 0, tzinfo=timezone.utc),
             updated_at=datetime(2026, 8, 22, 9, 30, tzinfo=timezone.utc),
-            association_reasons=["assigned", "created"],
+            association_reasons=[AssociationReason.ASSIGNED, AssociationReason.CREATED],
         )
         self.assertEqual(issue.doc_id, "brianquinlan_marathon2_42")
         self.assertEqual(issue.issue_type, IssueType.ISSUE)
+        self.assertIn(AssociationReason.ASSIGNED, issue.association_reasons)
         self.assertIn("assigned", issue.association_reasons)
 
         # Test Pydantic JSON serialization
         json_str = issue.model_dump_json()
         self.assertIn('"owner":"brianquinlan"', json_str.replace(" ", ""))
         self.assertIn('"issue_type":"issue"', json_str.replace(" ", ""))
+        self.assertIn('"association_reasons":["assigned","created"]', json_str.replace(" ", ""))
         dumped = issue.model_dump()
         self.assertEqual(dumped["issue_number"], 42)
 

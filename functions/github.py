@@ -14,7 +14,7 @@ from datetime import datetime, timezone
 from enum import Enum
 import re
 import threading
-from typing import Any, Dict, List, Optional, Set, Tuple
+from typing import Any, Dict, List, Optional, Set, Tuple, Union
 import logging
 import requests
 from pydantic import BaseModel, Field, ConfigDict
@@ -33,6 +33,16 @@ GITHUB_API_BASE_URL = "https://api.github.com"
 class IssueType(str, Enum):
     ISSUE = "issue"
     PULL_REQUEST = "pull_request"
+
+
+class AssociationReason(str, Enum):
+    """
+    Enumeration of reasons why a GitHub issue is associated with a user.
+    """
+    ASSIGNED = "assigned"
+    MENTIONED = "mentioned"
+    CREATED = "created"
+    MONITORED_REPO = "monitored_repo"
 
 
 class Comment(BaseModel):
@@ -73,7 +83,7 @@ class Issue(BaseModel):
     state: str = "open"
     last_comment_update_time: Optional[datetime] = None
     comments: List[Comment] = Field(default_factory=list)
-    association_reasons: List[str] = Field(default_factory=list)
+    association_reasons: List[AssociationReason] = Field(default_factory=list)
     title: Optional[str] = None
 
     @property
@@ -242,13 +252,18 @@ def process_and_save_issue_page(
         doc_ref = issues_col.document(doc_id)
         doc_snap = doc_ref.get()
 
-        reasons = {reason}
+        parsed_reason = AssociationReason(reason) if isinstance(reason, str) and reason in AssociationReason._value2member_map_ else reason
+        reasons = {parsed_reason}
         existing_comments: List[Comment] = []
         last_comment_time = None
 
         if doc_snap.exists:
             existing_data = doc_snap.to_dict() or {}
-            reasons.update(existing_data.get("association_reasons") or [])
+            for r in existing_data.get("association_reasons") or []:
+                if isinstance(r, str) and r in AssociationReason._value2member_map_:
+                    reasons.add(AssociationReason(r))
+                else:
+                    reasons.add(r)
             existing_comments = [
                 Comment.model_validate(c)
                 for c in existing_data.get("comments", [])
@@ -513,7 +528,7 @@ def enqueue_issue_page_sync(
     uid: str,
     url: str,
     params: Optional[Dict[str, Any]] = None,
-    reason: str = "assigned",
+    reason: Union[AssociationReason, str] = AssociationReason.ASSIGNED,
     owner_fallback: Optional[str] = None,
     repo_fallback: Optional[str] = None,
     db: Optional[firestore.Client] = None
@@ -524,11 +539,12 @@ def enqueue_issue_page_sync(
     """
     try:
         queue = admin_functions.task_queue("sync_github_issues_page")
+        reason_val = reason.value if isinstance(reason, AssociationReason) else str(reason)
         task_data = {
             "uid": uid,
             "url": url,
             "params": params or {},
-            "reason": reason,
+            "reason": reason_val,
             "owner_fallback": owner_fallback,
             "repo_fallback": repo_fallback,
         }
@@ -549,12 +565,13 @@ def enqueue_issue_page_sync(
                         repo_fallback=repo_fallback,
                         db=db
                     )
-                except Exception as ex:
-                    logger.error(f"Error in fallback execute_issue_page_sync: {ex}")
+                except Exception as inner_e:
+                    logger.error(f"Background thread execution error in execute_issue_page_sync: {inner_e}")
 
-            thread = threading.Thread(target=_worker, daemon=True)
-            thread.start()
-        return "fallback_dispatched"
+            t = threading.Thread(target=_worker, daemon=True)
+            t.start()
+            return "thread_dispatched"
+        return None
 
 
 def enqueue_comment_page_sync(
@@ -601,21 +618,21 @@ def enqueue_comment_page_sync(
 
 def fetch_github_user_login(access_token: str) -> Optional[str]:
     """
-    Fetches the authenticated user's GitHub username (login) from the GitHub API (/user).
+    Fetches the authenticated user's GitHub username (login) using their access token.
+    Calls GET https://api.github.com/user.
     """
     try:
         headers = {
             "Authorization": f"Bearer {access_token}",
-            "Accept": "application/vnd.github+json",
-            "X-GitHub-Api-Version": "2022-11-28",
+            "Accept": "application/vnd.github.v3+json",
+            "User-Agent": "Firebase-GitHub-Sync-App",
         }
         resp = requests.get(f"{GITHUB_API_BASE_URL}/user", headers=headers, timeout=10)
         if resp.status_code == 200:
             data = resp.json()
             return data.get("login")
-        else:
-            logger.warning(f"Failed to fetch GitHub user login: HTTP {resp.status_code} - {resp.text}")
-            return None
+        logger.warning(f"Failed to fetch GitHub user login: HTTP {resp.status_code} - {resp.text}")
+        return None
     except Exception as e:
         logger.error(f"Exception fetching GitHub user login: {e}")
         return None
@@ -656,12 +673,12 @@ def start_user_github_sync(
 
     # 1. Enqueue user-level issue filters
     filters = [
-        ("assigned", "assigned"),
-        ("mentioned", "mentioned"),
-        ("created", "created"),
+        ("assigned", AssociationReason.ASSIGNED),
+        ("mentioned", AssociationReason.MENTIONED),
+        ("created", AssociationReason.CREATED),
     ]
 
-    for filter_name, reason_label in filters:
+    for filter_name, reason_enum in filters:
         params: Dict[str, Any] = {
             "filter": filter_name,
             "state": state,
@@ -675,10 +692,10 @@ def start_user_github_sync(
             uid=user.uid,
             url=url,
             params=params,
-            reason=reason_label,
+            reason=reason_enum,
             db=db
         )
-        enqueued_tasks.append({"reason": reason_label, "url": url, "task_id": tid})
+        enqueued_tasks.append({"reason": reason_enum.value, "url": url, "task_id": tid})
 
     # 2. Enqueue monitored repository endpoints
     for repo_path in user.monitored_repos:
@@ -699,7 +716,7 @@ def start_user_github_sync(
             uid=user.uid,
             url=url,
             params=params,
-            reason="monitored_repo",
+            reason=AssociationReason.MONITORED_REPO,
             owner_fallback=owner_part,
             repo_fallback=repo_part,
             db=db
