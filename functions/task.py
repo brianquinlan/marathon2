@@ -50,15 +50,14 @@ class Task(BaseModel):
 # Ranker Engine
 # ============================================================================
 
-def run_ranker(tasks: List[Task]) -> List[Task]:
+def run_ranker(task: Task) -> Task:
     """
-    Ranker engine that computes priorities for tasks needing updates.
+    Ranker engine that computes priority for a single task.
     Currently a placeholder that resets priority_needs_updated to False.
     """
-    logger.info(f"Ranker engine processing {len(tasks)} tasks.")
-    for task in tasks:
-        task.priority_needs_updated = False
-    return tasks
+    logger.info(f"Ranker engine processing task {task.doc_id}.")
+    task.priority_needs_updated = False
+    return task
 
 
 # ============================================================================
@@ -68,22 +67,25 @@ def run_ranker(tasks: List[Task]) -> List[Task]:
 
 def enqueue_task_ranking(
     uid: str,
+    task_id: str,
     function_name: str = "rank_user_tasks",
     db: Optional[firestore.Client] = None,
     opts: Optional[admin_functions.TaskOptions] = None
 ) -> Dict[str, Any]:
     """
     Enqueues a task to the Firebase Task Queue function using the official Firebase Admin SDK.
+    Dispatches a payload with the user UID and task document ID.
     See: https://firebase.google.com/docs/functions/task-functions#python
     """
     try:
         queue = admin_functions.task_queue(function_name)
         task_opts = opts or admin_functions.TaskOptions(dispatch_deadline_seconds=300)
-        task_id = queue.enqueue({"uid": uid}, opts=task_opts)
-        logger.info(f"Enqueued Firebase task '{task_id}' in queue '{function_name}' for UID {uid}")
+        enqueued_id = queue.enqueue({"uid": uid, "task_id": task_id}, opts=task_opts)
+        logger.info(f"Enqueued Firebase task '{enqueued_id}' in queue '{function_name}' for task '{task_id}' (UID {uid})")
         return {
             "status": "enqueued",
-            "task_id": task_id,
+            "task_id": enqueued_id,
+            "target_task_id": task_id,
             "queue": function_name,
             "uid": uid,
         }
@@ -94,9 +96,9 @@ def enqueue_task_ranking(
         if db is not None:
             def async_worker():
                 try:
-                    update_needed_priorities(uid=uid, db=db)
+                    update_task_priority(uid=uid, task_id=task_id, db=db)
                 except Exception as ex:
-                    logger.error(f"Error in async ranking worker for UID {uid}: {ex}")
+                    logger.error(f"Error in async ranking worker for task {task_id} (UID {uid}): {ex}")
 
             thread = threading.Thread(target=async_worker, daemon=True)
             thread.start()
@@ -104,6 +106,7 @@ def enqueue_task_ranking(
         return {
             "status": "enqueued",
             "mode": "async_dispatched_fallback",
+            "target_task_id": task_id,
             "uid": uid,
         }
 
@@ -158,59 +161,41 @@ def ensure_task_for_issue(
     return task
 
 
-def update_needed_priorities(uid: str, db: firestore.Client) -> Dict[str, Any]:
+def update_task_priority(uid: str, task_id: str, db: firestore.Client) -> Dict[str, Any]:
     """
-    Finds all tasks for the user where priority_needs_updated == True,
-    calls the ranker, and persists the updated priorities back to Firestore.
+    Retrieves a single task from Firestore for a given user, calls the ranker,
+    and persists the updated priority back to Firestore.
     """
-    tasks_col = db.collection("users").document(uid).collection("tasks")
-    docs = tasks_col.where("priority_needs_updated", "==", True).stream()
+    task_ref = db.collection("users").document(uid).collection("tasks").document(task_id)
+    doc_snap = task_ref.get()
+    if not doc_snap.exists:
+        logger.warning(f"Task {task_id} not found for UID {uid}.")
+        return {"status": "not_found", "task_id": task_id, "uid": uid}
 
-    tasks_to_update: List[Task] = []
-    doc_refs: Dict[str, Any] = {}
+    task = Task.model_validate({**(doc_snap.to_dict() or {}), "id": task_id})
+    ranked_task = run_ranker(task)
 
-    for doc_snap in docs:
-        t = Task.model_validate({**(doc_snap.to_dict() or {}), "id": doc_snap.id})
-        tasks_to_update.append(t)
-        doc_refs[t.doc_id] = doc_snap.reference
+    task_ref.set({
+        "priority": ranked_task.priority,
+        "priority_needs_updated": False,
+        "updated_at": firestore.SERVER_TIMESTAMP,
+    }, merge=True)
 
-    if not tasks_to_update:
-        logger.info(f"No tasks require priority update for user {uid}.")
-        return {
-            "status": "success",
-            "updated_count": 0,
-            "message": "All tasks are already up-to-date.",
-            "tasks": []
-        }
-
-    # Execute ranker
-    ranked_tasks = run_ranker(tasks_to_update)
-
-    # Batch persist updated priorities
-    batch = db.batch()
-    for task in ranked_tasks:
-        ref = doc_refs.get(task.doc_id) or tasks_col.document(task.doc_id)
-        batch.set(ref, {
-            "priority": task.priority,
-            "priority_needs_updated": False,
-            "updated_at": firestore.SERVER_TIMESTAMP,
-        }, merge=True)
-    batch.commit()
-
-    logger.info(f"Updated priorities for {len(ranked_tasks)} tasks for user {uid}.")
+    logger.info(f"Updated priority for task {task_id} for user {uid}.")
     return {
         "status": "success",
-        "updated_count": len(ranked_tasks),
-        "message": f"Updated priorities for {len(ranked_tasks)} tasks.",
-        "tasks": [t.model_dump(mode="json") for t in ranked_tasks],
+        "task_id": task_id,
+        "uid": uid,
+        "priority": ranked_task.priority,
+        "task": ranked_task.model_dump(mode="json"),
     }
 
 
 def force_rerank_tasks(uid: str, db: firestore.Client) -> Dict[str, Any]:
     """
     Forces all tasks for the user to be reranked asynchronously:
-    1. Sets priority_needs_updated = True for all tasks in Firestore.
-    2. Enqueues a task to run the ranking in the background using Firebase task_queue.
+    Sets priority_needs_updated = True for all tasks in Firestore.
+    The on_task_written trigger will automatically detect each task write and enqueue ranking.
     """
     tasks_col = db.collection("users").document(uid).collection("tasks")
     all_docs = tasks_col.stream()
@@ -229,13 +214,10 @@ def force_rerank_tasks(uid: str, db: firestore.Client) -> Dict[str, Any]:
         batch.commit()
         logger.info(f"Marked {count} tasks as priority_needs_updated=True for forced rerank.")
 
-    # Enqueue via Firebase Admin Task Queue
-    enqueue_result = enqueue_task_ranking(uid=uid, function_name="rank_user_tasks", db=db)
     return {
-        "status": "enqueued",
+        "status": "marked",
         "marked_count": count,
-        "message": f"Marked {count} tasks for rerank and enqueued ranking task.",
-        "enqueue_info": enqueue_result,
+        "message": f"Marked {count} tasks for rerank.",
     }
 
 

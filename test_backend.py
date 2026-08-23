@@ -614,6 +614,7 @@ class TestFirestoreTaskTrigger(unittest.TestCase):
         handler(mock_event)
         mock_enqueue_ranking.assert_called_once_with(
             uid="user_task_trig_1",
+            task_id="task_issue_1",
             function_name="rank_user_tasks",
             db=mock_db
         )
@@ -646,6 +647,7 @@ class TestFirestoreTaskTrigger(unittest.TestCase):
         handler(mock_event)
         mock_enqueue_ranking.assert_called_once_with(
             uid="user_task_trig_2",
+            task_id="task_issue_2",
             function_name="rank_user_tasks",
             db=mock_db
         )

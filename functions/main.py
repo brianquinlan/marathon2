@@ -34,7 +34,7 @@ from github import (
 )
 from task import (
     Task,
-    update_needed_priorities,
+    update_task_priority,
     force_rerank_tasks,
     enqueue_task_ranking,
     get_user_tasks
@@ -584,19 +584,20 @@ def sync_issue_comments_page(req: tasks_fn.CallableRequest) -> Dict[str, Any]:
 )
 def rank_user_tasks(req: tasks_fn.CallableRequest) -> Dict[str, Any]:
     """
-    Firebase Task Queue function for asynchronous ranking.
-    Dispatched via Cloud Tasks when task priorities need update.
+    Firebase Task Queue function for asynchronous ranking of a single task.
+    Dispatched via Cloud Tasks when a task's priority needs update.
     """
     data = req.data if isinstance(req.data, dict) else {}
     uid = data.get("uid")
-    if not uid:
+    task_id = data.get("task_id")
+    if not uid or not task_id:
         raise tasks_fn.HttpsError(
             code=tasks_fn.FunctionsErrorCode.INVALID_ARGUMENT,
-            message="Missing 'uid' in task payload."
+            message="Missing 'uid' or 'task_id' in task payload."
         )
 
-    logger.info(f"Executing asynchronous ranking for UID {uid} in Task Queue worker.")
-    result = update_needed_priorities(uid=uid, db=db)
+    logger.info(f"Executing asynchronous ranking for task {task_id} (UID {uid}) in Task Queue worker.")
+    result = update_task_priority(uid=uid, task_id=task_id, db=db)
     return result
 
 
@@ -871,9 +872,9 @@ def on_task_written(
         task_id = event.params.get("task_id")
         logger.info(
             f"Task document changed with priority_needs_updated=True for UID {uid}, task {task_id}. "
-            f"Triggering asynchronous task reranking."
+            f"Triggering asynchronous task reranking for single task."
         )
-        enqueue_task_ranking(uid=uid, function_name="rank_user_tasks", db=db)
+        enqueue_task_ranking(uid=uid, task_id=task_id, function_name="rank_user_tasks", db=db)
 
 
 
