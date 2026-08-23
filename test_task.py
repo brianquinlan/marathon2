@@ -47,7 +47,6 @@ def get_callable_handler(func):
 class TestTaskModel(unittest.TestCase):
     def test_task_model_defaults_properties_and_json_serialization(self):
         task = Task(
-            id="task_owner_repo_1",
             priority=0.85,
             priority_needs_updated=True,
             owner="owner",
@@ -70,7 +69,7 @@ class TestTaskModel(unittest.TestCase):
 
         # Test dictionary conversion via model_dump
         dumped = task.model_dump()
-        self.assertEqual(dumped["id"], "task_owner_repo_1")
+        self.assertEqual(dumped["owner"], "owner")
         self.assertEqual(dumped["priority"], 0.85)
         self.assertTrue(dumped["priority_needs_updated"])
         self.assertEqual(dumped["github_issue_title"], "Fix high priority bug")
@@ -137,7 +136,9 @@ class TestRankerEngine(unittest.TestCase):
         mock_agent.run_sync.side_effect = fake_run_sync
 
         task = Task(
-            id="task_1",
+            owner="owner",
+            repo="repo",
+            issue_number=1,
             priority=0.0,
             priority_needs_updated=True,
             github_issue_title="Critical Blocker",
@@ -187,7 +188,7 @@ class TestRankerEngine(unittest.TestCase):
             mock_res,
         ]
 
-        task = Task(id="task_retry", priority=0.0, priority_needs_updated=True)
+        task = Task(owner="owner", repo="repo", issue_number=1, priority=0.0, priority_needs_updated=True)
         ranked = run_ranker(task=task, gemini_api_key="key", agent=mock_agent)
         self.assertEqual(ranked.priority, 0.85)
         self.assertFalse(ranked.priority_needs_updated)
@@ -199,7 +200,7 @@ class TestRankerEngine(unittest.TestCase):
         mock_agent = MagicMock()
         mock_agent.run_sync.side_effect = RuntimeError("Non-recoverable fatal error")
 
-        task = Task(id="task_err", priority=0.65, priority_needs_updated=True)
+        task = Task(owner="owner", repo="repo", issue_number=1, priority=0.65, priority_needs_updated=True)
         with self.assertRaises(RuntimeError):
             run_ranker(task=task, gemini_api_key="bad_key", agent=mock_agent)
 
@@ -240,7 +241,6 @@ class TestTaskFirestoreOperations(unittest.TestCase):
         # Case 2: Task already exists (modified issue -> sets priority_needs_updated = True)
         mock_doc_snap.exists = True
         mock_doc_snap.to_dict.return_value = {
-            "id": "task_org_repo_1",
             "priority": 0.7,
             "priority_needs_updated": False,
             "owner": "org",
@@ -272,7 +272,6 @@ class TestTaskFirestoreOperations(unittest.TestCase):
         mock_task_snap = MagicMock()
         mock_task_snap.exists = True
         mock_task_snap.to_dict.return_value = {
-            "id": "task_issue_10",
             "owner": "org",
             "repo": "repo",
             "issue_number": 10,
@@ -301,9 +300,7 @@ class TestTaskFirestoreOperations(unittest.TestCase):
         mock_tasks_col.document.return_value = mock_task_ref
         mock_db.collection.return_value.document.return_value = mock_user_doc
 
-        ranked_mock_task = Task(
-            id="task_issue_10", owner="org", repo="repo", issue_number=10, priority=0.88, priority_needs_updated=False
-        )
+        ranked_mock_task = Task(owner="org", repo="repo", issue_number=10, priority=0.88, priority_needs_updated=False)
         mock_run_ranker.return_value = ranked_mock_task
 
         result = update_task_priority("user_100", "task_issue_10", mock_db)

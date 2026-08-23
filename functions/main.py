@@ -93,7 +93,7 @@ def render_main_page(req: https_fn.Request) -> Response:
         t_data = doc.to_dict() or {}
         tasks_list.append(t_data)
         if t_data.get("priority_needs_updated"):
-            raw_id = t_data.get("id") or doc.id
+            raw_id = doc.id
             if raw_id:
                 unranked_task_ids.append(str(raw_id))
 

@@ -32,7 +32,6 @@ class Task(BaseModel):
     owner: str | None = None
     repo: str | None = None
     issue_number: int | None = None
-    id: str | None = None  # Task document ID (e.g. task_{owner}_{repo}_{issue_number})
     github_issue_title: str | None = None  # Optional cached title copied from GitHub issue
     github_issue_url: str | None = None  # Optional direct URL copied from GitHub issue
     created_at: datetime | None = None
@@ -41,8 +40,6 @@ class Task(BaseModel):
     @property
     def doc_id(self) -> str:
         """Standardized document ID for Firestore."""
-        if self.id:
-            return self.id
         if self.owner and self.repo and self.issue_number:
             return f"task_{self.owner}_{self.repo}_{self.issue_number}"
         return "task_unknown"
@@ -128,8 +125,10 @@ def ensure_task_for_issue(uid: str, issue_id: str, issue_data: dict[str, object]
     issue_number = int(raw_num) if isinstance(raw_num, (int, str)) and str(raw_num).isdigit() else None
 
     if doc_snap.exists:
-        raw_dict = doc_snap.to_dict() or {}
-        task = Task.model_validate({**raw_dict, "id": task_doc_id})
+        raw_dict = doc_snap.to_dict()
+        if not isinstance(raw_dict, dict):
+            raw_dict = {}
+        task = Task.model_validate(raw_dict)
         task.priority_needs_updated = True
         task.github_issue_title = issue_title or task.github_issue_title
         task.github_issue_url = issue_url or task.github_issue_url
@@ -138,7 +137,6 @@ def ensure_task_for_issue(uid: str, issue_id: str, issue_data: dict[str, object]
         task.issue_number = issue_number or task.issue_number
     else:
         task = Task(
-            id=task_doc_id,
             priority=0.0,
             priority_needs_updated=True,
             owner=owner,
@@ -169,8 +167,10 @@ def update_task_priority(uid: str, task_id: str, db: firestore.Client) -> dict[s
         logger.warning(f"[UPDATE_TASK_PRIORITY] Task document {task_id} NOT found for UID {uid}.")
         return {"status": "not_found", "task_id": task_id, "uid": uid}
 
-    raw_task_data = doc_snap.to_dict() or {}
-    task = Task.model_validate({**raw_task_data, "id": task_id})
+    raw_task_data = doc_snap.to_dict()
+    if not isinstance(raw_task_data, dict):
+        raw_task_data = {}
+    task = Task.model_validate(raw_task_data)
     logger.info(
         f"[UPDATE_TASK_PRIORITY] Loaded task {task_id}: title='{task.github_issue_title}', "
         f"priority={task.priority}, priority_needs_updated={task.priority_needs_updated}, "
@@ -207,9 +207,9 @@ def update_task_priority(uid: str, task_id: str, db: firestore.Client) -> dict[s
     repo = task.repo
     num = task.issue_number
 
-    # Fallback parsing from task.id if not explicitly set on Task
-    if (not owner or not repo or not num) and task.id:
-        clean_id = task.id.removeprefix("task_")
+    # Fallback parsing from task_id if not explicitly set on Task
+    if (not owner or not repo or not num) and task_id:
+        clean_id = task_id.removeprefix("task_")
         parts = clean_id.rsplit("_", 1)
         if len(parts) == 2 and parts[1].isdigit():
             num = int(parts[1])
@@ -308,8 +308,10 @@ def get_user_tasks(uid: str, db: firestore.Client, limit: int = 100) -> list[dic
     tasks: list[dict[str, object]] = []
     for doc_snap in docs:
         raw_dict = doc_snap.to_dict() or {}
-        t = Task.model_validate({**raw_dict, "id": doc_snap.id})
-        tasks.append(t.model_dump(mode="json"))
+        t = Task.model_validate(raw_dict)
+        t_dict = t.model_dump(mode="json")
+        t_dict["id"] = doc_snap.id
+        tasks.append(t_dict)
 
     # Sort descending by priority
     tasks.sort(key=lambda x: float(x.get("priority", 0.0)), reverse=True)  # type: ignore
