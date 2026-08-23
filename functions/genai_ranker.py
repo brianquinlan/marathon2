@@ -45,6 +45,26 @@ _pydantic_ai_agents: dict[tuple[str, str], Agent[None, TaskPriorityOutput]] = {}
 _agent_lock = threading.Lock()
 
 
+DEFAULT_SYSTEM_PROMPT = """You are my executive engineering assistant. Your role is to rank GitHub issues and pull requests (PRs) so that I focus on items that maximize my development and review efficiency.
+
+The most important thing to consider when deciding an issue's priority is how actionable it is. If an issue is not actionable, there is no point in considering it.
+
+An issue is actionable if:
+- I am mentioned and have not responded.
+- I am assigned a PR and have not provided review feedback. Or if I have provided review feedback and it has been addressed.
+
+An issue is not actionable if:
+- It has the "needs-info" or similar label.
+- I am waiting for another party to take action, such as respond to a question or address code review comments.
+- In general, an issue is not actionable if I was the last person to act.
+
+PRs are higher priority than other issues.
+
+Issues created or commented-on by my usual collaborators are more important than issues created by strangers. Unless the  collaborators indicate that the issue is not important.
+
+Issues with recent activity are higher priority than dormant issues."""
+
+
 def get_pydantic_ai_agent(
     api_key: str | None = None, system_prompt: str | None = None
 ) -> Agent[None, TaskPriorityOutput]:
@@ -52,7 +72,7 @@ def get_pydantic_ai_agent(
     Lazily initializes and caches Pydantic AI Agent instances configured with Google Gemini model.
     """
     effective_key = api_key or os.environ.get("GEMINI_API_KEY") or ""
-    prompt_str = system_prompt or ""
+    prompt_str = system_prompt if system_prompt is not None else DEFAULT_SYSTEM_PROMPT
     cache_key = (effective_key, prompt_str)
 
     with _agent_lock:
@@ -60,7 +80,7 @@ def get_pydantic_ai_agent(
             provider = GoogleProvider(api_key=effective_key)
             model = GoogleModel("gemini-3.7-flash", provider=provider)
             _pydantic_ai_agents[cache_key] = Agent(
-                model=model, output_type=TaskPriorityOutput, system_prompt=system_prompt or ""
+                model=model, output_type=TaskPriorityOutput, system_prompt=prompt_str
             )
         return _pydantic_ai_agents[cache_key]
 
@@ -124,19 +144,6 @@ def run_ranker(
         f"author='{issue_author}', upvotes={issue_upvotes}, comments_count={len(comments)}"
     )
 
-    system_instruction = (
-        "You are an expert AI developer productivity assistant that assigns a priority score "
-        "between 0.0 (lowest) and 1.0 (highest) to GitHub issues/tasks for a software engineer.\n"
-        "Evaluation Criteria:\n"
-        "- Direct user mentions or requests for action: If the current user is @mentioned in the issue body or comments, or explicitly asked for input/review/action, assign HIGH priority (0.80 - 1.00).\n"
-        "- Directly assigned or blocker bugs: High priority bugs, regressions, or issues assigned to the user should be rated 0.70 - 0.90.\n"
-        "- Active discussions or questions: Active ongoing discussions where the user is involved or monitored repo issues should be rated 0.40 - 0.70.\n"
-        "- Community interest & upvotes: Issues with a high number of upvotes (+1 reactions) indicate broad user impact or popularity and should receive increased priority.\n"
-        "- Informational / low urgency: Low impact feature requests, minor discussions, or items not requiring immediate attention should be rated 0.10 - 0.40.\n"
-        "- Closed or resolved: 0.00 - 0.10.\n"
-        "Always return a structured response conforming to the TaskPriorityOutput schema with a numerical priority float."
-    )
-
     prompt_text = f"""
 Current User GitHub Username: {user_info_str}
 
@@ -158,7 +165,7 @@ Please evaluate the priority for the user {user_info_str} and assign a priority 
 """.strip()
 
     try:
-        active_agent = agent or get_pydantic_ai_agent(api_key=gemini_api_key, system_prompt=system_instruction)
+        active_agent = agent or get_pydantic_ai_agent(api_key=gemini_api_key, system_prompt=DEFAULT_SYSTEM_PROMPT)
         logger.info(f"[RANKER] Executing synchronous run_sync with Pydantic AI for task {task.doc_id}...")
 
         result = active_agent.run_sync(user_prompt=prompt_text)
