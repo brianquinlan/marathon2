@@ -150,11 +150,12 @@ class TestRankerEngine(unittest.TestCase):
         self.assertEqual(ranked.priority, 0.92)
         self.assertFalse(ranked.priority_needs_updated)
 
-    @patch("pydantic_ai.providers.google.GoogleProvider")
-    @patch("pydantic_ai.models.google.GoogleModel")
-    @patch("pydantic_ai.Agent")
+    @patch("genai_ranker.GoogleProvider")
+    @patch("genai_ranker.GoogleModel")
+    @patch("genai_ranker.Agent")
     def test_get_pydantic_ai_agent_uses_gemini_api_key(self, mock_agent_cls, mock_model_cls, mock_provider_cls):
-        from task import get_pydantic_ai_agent
+        from genai_ranker import _pydantic_ai_agents, get_pydantic_ai_agent
+        _pydantic_ai_agents.clear()
         mock_agent_instance = MagicMock()
         mock_agent_cls.return_value = mock_agent_instance
 
@@ -185,11 +186,10 @@ class TestTaskFirestoreOperations(unittest.TestCase):
         mock_db.collection.return_value.document.return_value = mock_user_doc
         mock_user_doc.collection.return_value = mock_tasks_col
         mock_tasks_col.document.return_value = mock_task_ref
-
-        # Case 1: Task does not exist yet (create)
-        mock_doc_snap.exists = False
         mock_task_ref.get.return_value = mock_doc_snap
 
+        # Case 1: Task does not exist yet (brand new issue -> sets priority_needs_updated = True)
+        mock_doc_snap.exists = False
         task = ensure_task_for_issue(
             uid="user_100",
             issue_id="org_repo_1",
@@ -303,10 +303,8 @@ class TestTaskFirestoreOperations(unittest.TestCase):
         mock_db.batch.return_value = mock_batch
 
         mock_doc1 = MagicMock()
-        mock_doc1.id = "task_a"
-        mock_doc1.to_dict.return_value = {"id": "task_a", "priority": 0.4}
-        mock_doc1.reference = MagicMock()
-
+        mock_doc1.id = "task_1"
+        mock_doc1.to_dict.return_value = {"id": "task_1", "priority": 0.5, "priority_needs_updated": False}
         mock_tasks_col.stream.return_value = [mock_doc1]
 
         result = force_rerank_tasks("user_100", mock_db)
@@ -332,12 +330,14 @@ class TestTaskFirestoreOperations(unittest.TestCase):
         args, kwargs = mock_queue.enqueue.call_args
         self.assertEqual(args[0], {"uid": "user_task_queue_1", "task_id": "task_abc_1"})
 
-    def test_enqueue_task_ranking_fallback_dispatch(self):
+    @patch("threading.Thread")
+    def test_enqueue_task_ranking_fallback_dispatch(self, mock_thread):
         mock_db = MagicMock()
         res = enqueue_task_ranking(uid="user_async_1", task_id="task_fallback_1", db=mock_db)
         self.assertEqual(res["status"], "enqueued")
         self.assertEqual(res["uid"], "user_async_1")
         self.assertEqual(res["target_task_id"], "task_fallback_1")
+        mock_thread.assert_called_once()
 
     def test_get_user_tasks_sorted_by_priority(self):
         mock_db = MagicMock()
@@ -380,6 +380,7 @@ class TestTaskQueueFunction(unittest.TestCase):
         mock_req.data = {"uid": "user_queue_001", "task_id": "task_queue_001"}
 
         result = handler(mock_req)
+        assert isinstance(result, dict)
         self.assertEqual(result["status"], "success")
         mock_update_fn.assert_called_once_with(uid="user_queue_001", task_id="task_queue_001", db=mock_db)
 

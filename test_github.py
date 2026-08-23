@@ -7,7 +7,7 @@ Firestore persistence, and ensuring Tasks are ONLY created once an Issue and all
 import sys
 import os
 import unittest
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock, patch, ANY
 from datetime import datetime, timezone
 
 # Add functions to path
@@ -304,7 +304,7 @@ class TestGitHubUserLoginDiscovery(unittest.TestCase):
         self.assertEqual(user.github_username, "brianquinlan")
         mock_fetch_login.assert_called_once_with("gho_tok_discover")
         mock_user_doc.set.assert_any_call(
-            {"github_username": "brianquinlan", "updated_at": unittest.mock.ANY},
+            {"github_username": "brianquinlan", "updated_at": ANY},
             merge=True
         )
 
@@ -356,7 +356,7 @@ class TestClosedIssuesSync(unittest.TestCase):
 
         self.assertEqual(res["status"], "success")
         self.assertEqual(res["closed_issues_count"], 1)
-        mock_issue_ref.set.assert_called_with({"state": "closed", "updated_at": unittest.mock.ANY}, merge=True)
+        mock_issue_ref.set.assert_called_with({"state": "closed", "updated_at": ANY}, merge=True)
         mock_task_ref.delete.assert_called_once()
 
 

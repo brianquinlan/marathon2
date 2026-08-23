@@ -1,14 +1,10 @@
-"""
-Comprehensive Unit and Integration Tests for Firebase Functions Python Backend
-Tests User dataclass, Google/GitHub auth extraction, monitored_repos, issue syncing, Task ranking, and REST handlers.
-"""
-
 import sys
 import os
 import unittest
 from unittest.mock import MagicMock, patch
 import json
 from datetime import datetime, timezone
+from flask import Response
 
 # Ensure functions module is in sys.path
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "functions"))
@@ -141,8 +137,11 @@ class TestCallableFunctionLogic(unittest.TestCase):
         }
 
         result = handler(mock_req)
+        assert isinstance(result, dict)
         self.assertEqual(result["status"], "success")
-        self.assertEqual(result["user"]["monitored_repos"], ["brianquinlan/marathon2", "org/awesome-project"])
+        user_res = result.get("user")
+        assert isinstance(user_res, dict)
+        self.assertEqual(user_res["monitored_repos"], ["brianquinlan/marathon2", "org/awesome-project"])
         mock_doc_ref.set.assert_called_once()
 
     @patch("main.start_user_github_sync")
@@ -172,6 +171,7 @@ class TestCallableFunctionLogic(unittest.TestCase):
         mock_req.data = {"state": "all"}
 
         result = handler(mock_req)
+        assert isinstance(result, dict)
         self.assertEqual(result["status"], "enqueued")
         self.assertEqual(result["initial_queues_count"], 4)
 
@@ -190,6 +190,7 @@ class TestCallableFunctionLogic(unittest.TestCase):
         mock_req.auth.uid = "user_rank_002"
 
         result = handler(mock_req)
+        assert isinstance(result, dict)
         self.assertEqual(result["status"], "enqueued")
         mock_force_fn.assert_called_once_with(uid="user_rank_002", db=mock_db)
 
@@ -230,6 +231,7 @@ class TestTaskQueueSyncHandlers(unittest.TestCase):
         }
 
         result = handler(mock_req)
+        assert isinstance(result, dict)
         self.assertEqual(result["status"], "success")
         self.assertEqual(result["saved_count"], 1)
         self.assertEqual(result["next_url"], "https://api.github.com/issues?page=2")
@@ -269,6 +271,7 @@ class TestTaskQueueSyncHandlers(unittest.TestCase):
         }
 
         result = handler(mock_req)
+        assert isinstance(result, dict)
         self.assertEqual(result["status"], "success")
         self.assertEqual(result["saved_comments_count"], 1)
         mock_enqueue_next_comments.assert_called_once()
@@ -302,8 +305,9 @@ class TestJinjaMainPageRendering(unittest.TestCase):
         mock_req.headers = {}
 
         resp = handler(mock_req)
+        assert isinstance(resp, Response)
         self.assertEqual(resp.status_code, 200)
-        self.assertIn("text/html", resp.headers["Content-Type"])
+        self.assertIn("text/html", str(resp.headers.get("Content-Type")))
         html = resp.get_data(as_text=True)
         self.assertIn("Login", html)
         self.assertIn("Sign in with Google", html)
@@ -356,8 +360,9 @@ class TestJinjaMainPageRendering(unittest.TestCase):
         mock_req.headers = {}
 
         resp = handler(mock_req)
+        assert isinstance(resp, Response)
         self.assertEqual(resp.status_code, 200)
-        self.assertIn("text/html", resp.headers["Content-Type"])
+        self.assertIn("text/html", str(resp.headers.get("Content-Type")))
         html = resp.get_data(as_text=True)
 
         # Verify static ranked task order
@@ -387,8 +392,9 @@ class TestJinjaSettingsPageCRUD(unittest.TestCase):
         mock_req.headers = {}
 
         resp = handler(mock_req)
+        assert isinstance(resp, Response)
         self.assertEqual(resp.status_code, 302)
-        self.assertEqual(resp.headers["Location"], "/")
+        self.assertEqual(resp.headers.get("Location"), "/")
 
     @patch("main.auth.verify_id_token")
     @patch("main.db")
@@ -417,6 +423,7 @@ class TestJinjaSettingsPageCRUD(unittest.TestCase):
         mock_req.headers = {}
 
         resp = handler(mock_req)
+        assert isinstance(resp, Response)
         self.assertEqual(resp.status_code, 200)
         html = resp.get_data(as_text=True)
         self.assertIn("<h2>Settings</h2>", html)
@@ -456,6 +463,7 @@ class TestJinjaSettingsPageCRUD(unittest.TestCase):
         }
 
         resp = handler(mock_req)
+        assert isinstance(resp, Response)
         self.assertEqual(resp.status_code, 200)
         html = resp.get_data(as_text=True)
         self.assertIn("Settings updated successfully", html)

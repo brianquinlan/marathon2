@@ -3,11 +3,15 @@ GenAI Task Ranking Module using Pydantic AI and Google Gemini Flash.
 Evaluates individual tasks with GitHub issue metadata, comments, and username mentions.
 """
 
+from __future__ import annotations
 import os
 import threading
 import logging
-from typing import Any, Dict, Optional, Tuple
+from typing import Dict, List, Optional, Protocol, Tuple, TypeVar
 from pydantic import BaseModel, Field
+from pydantic_ai import Agent
+from pydantic_ai.models.google import GoogleModel
+from pydantic_ai.providers.google import GoogleProvider
 
 logger = logging.getLogger(__name__)
 
@@ -22,46 +26,55 @@ class TaskPriorityOutput(BaseModel):
     )
 
 
+class TaskProtocol(Protocol):
+    @property
+    def doc_id(self) -> str: ...
+    priority: float
+    priority_needs_updated: bool
+    github_issue_title: Optional[str]
+
+
+TTask = TypeVar("TTask", bound=TaskProtocol)
+
 # ============================================================================
 # Ranker Engine: Pydantic AI & Gemini Flash
 # ============================================================================
 
-_pydantic_ai_agents: Dict[Tuple[str, str], Any] = {}
+_pydantic_ai_agents: Dict[Tuple[str, str], Agent[None, TaskPriorityOutput]] = {}
 _agent_lock = threading.Lock()
 
 
-def get_pydantic_ai_agent(api_key: Optional[str] = None, system_prompt: Optional[str] = None):
+def get_pydantic_ai_agent(
+    api_key: Optional[str] = None,
+    system_prompt: Optional[str] = None
+) -> Agent[None, TaskPriorityOutput]:
     """
     Lazily initializes and caches Pydantic AI Agent instances configured with Google Gemini model.
     """
-    from pydantic_ai import Agent
-    from pydantic_ai.models.google import GoogleModel
-    from pydantic_ai.providers.google import GoogleProvider
-
     effective_key = api_key or os.environ.get("GEMINI_API_KEY") or ""
     prompt_str = system_prompt or ""
     cache_key = (effective_key, prompt_str)
 
     with _agent_lock:
         if cache_key not in _pydantic_ai_agents:
-            provider = GoogleProvider(api_key=effective_key) if effective_key else GoogleProvider()
+            provider = GoogleProvider(api_key=effective_key)
             model = GoogleModel("gemini-3.7-flash", provider=provider)
             _pydantic_ai_agents[cache_key] = Agent(
                 model=model,
                 output_type=TaskPriorityOutput,
-                system_prompt=system_prompt or ()
+                system_prompt=system_prompt or ""
             )
         return _pydantic_ai_agents[cache_key]
 
 
 def run_ranker(
-    task: Any,
-    issue: Optional[Dict[str, Any]] = None,
+    task: TTask,
+    issue: Optional[Dict[str, object]] = None,
     github_username: Optional[str] = None,
     gemini_api_key: Optional[str] = None,
-    agent: Optional[Any] = None,
-    ai: Optional[Any] = None  # Backwards compatibility alias for mock injection
-) -> Any:
+    agent: Optional[Agent[None, TaskPriorityOutput]] = None,
+    ai: Optional[object] = None  # Backwards compatibility alias for mock injection
+) -> TTask:
     """
     Ranker engine that computes priority for a single task using Pydantic AI
     and the latest Gemini Flash model ('gemini-3.7-flash').
@@ -81,12 +94,13 @@ def run_ranker(
         )
 
     issue_data = issue or {}
-    comments = issue_data.get("comments") or []
+    raw_comments = issue_data.get("comments")
+    comments: List[object] = raw_comments if isinstance(raw_comments, list) else []
 
     # Construct prompt context
     user_info_str = f"@{github_username}" if github_username else "Unknown (not specified)"
 
-    comments_text_list = []
+    comments_text_list: List[str] = []
     for idx, c in enumerate(comments, 1):
         if isinstance(c, dict):
             c_author = c.get("user_login") or "unknown"
@@ -142,10 +156,10 @@ Please evaluate the priority for the user {user_info_str} and assign a priority 
 """.strip()
 
     try:
-        active_agent = agent or ai or get_pydantic_ai_agent(api_key=gemini_api_key, system_prompt=system_instruction)
+        active_agent = agent or (ai if hasattr(ai, "run_sync") else None) or get_pydantic_ai_agent(api_key=gemini_api_key, system_prompt=system_instruction)
         logger.info(f"[RANKER] Executing synchronous run_sync with Pydantic AI for task {task.doc_id}...")
 
-        result = active_agent.run_sync(user_prompt=prompt_text)
+        result = getattr(active_agent, "run_sync")(user_prompt=prompt_text)
         logger.info(f"[RANKER] Pydantic AI call succeeded for {task.doc_id}. Output: {getattr(result, 'output', getattr(result, 'data', None))}")
 
         computed_priority = 0.5

@@ -1,0 +1,15 @@
+{
+  "venvPath": "functions",
+  "venv": "venv",
+  "include": [
+    "functions",
+    "test_github.py",
+    "test_task.py",
+    "test_backend.py"
+  ],
+  "extraPaths": [
+    "functions"
+  ],
+  "typeCheckingMode": "standard",
+  "reportPrivateImportUsage": "none"
+}
