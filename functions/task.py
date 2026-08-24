@@ -9,7 +9,7 @@ from datetime import datetime
 
 from firebase_admin import functions as admin_functions
 from google.cloud import firestore
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, Field
 from queue_utils import dispatch_task
 
 from genai_ranker import run_ranker
@@ -29,6 +29,7 @@ class Task(BaseModel):
     issue_number: int | None = None
     github_issue_title: str | None = None  # Optional cached title copied from GitHub issue
     github_issue_url: str | None = None  # Optional direct URL copied from GitHub issue
+    sources: list[str] = Field(default_factory=list)  # e.g. ["assigned", "mentioned", "created", "monitored"]
     created_at: datetime | None = None
     updated_at: datetime | None = None
 
@@ -69,7 +70,13 @@ def enqueue_task_ranking(
 # ============================================================================
 
 
-def ensure_task_for_issue(uid: str, issue_id: str, issue_data: dict[str, object], db: firestore.Client) -> None:
+def ensure_task_for_issue(
+    uid: str,
+    issue_id: str,
+    issue_data: dict[str, object],
+    db: firestore.Client,
+    source: str | None = None,
+) -> None:
     """
     Creates or updates the Task associated with a given issue in Firestore under users/{uid}/tasks.
     When an issue is modified or created, priority_needs_updated is set to True.
@@ -100,6 +107,8 @@ def ensure_task_for_issue(uid: str, issue_id: str, issue_data: dict[str, object]
         task.owner = owner or task.owner
         task.repo = repo or task.repo
         task.issue_number = issue_number or task.issue_number
+        if source and source not in task.sources:
+            task.sources.append(source)
     else:
         task = Task(
             priority=0.0,
@@ -109,6 +118,7 @@ def ensure_task_for_issue(uid: str, issue_id: str, issue_data: dict[str, object]
             issue_number=issue_number,
             github_issue_title=issue_title,
             github_issue_url=issue_url,
+            sources=[source] if source else [],
         )
 
     task_data = task.model_dump()
@@ -116,6 +126,65 @@ def ensure_task_for_issue(uid: str, issue_id: str, issue_data: dict[str, object]
     if task.created_at is None:
         task_data["created_at"] = firestore.SERVER_TIMESTAMP
     task_ref.set(task_data, merge=True)
+
+
+def delete_all_user_tasks(uid: str, db: firestore.Client) -> int:
+    """
+    Deletes all tasks for a given user from Firestore.
+    """
+    tasks_col = db.collection("users").document(uid).collection("tasks")
+    tasks_docs = tasks_col.stream()
+    count = 0
+    for doc_snap in tasks_docs:
+        doc_snap.reference.delete()
+        count += 1
+    return count
+
+
+def mark_all_tasks_for_reranking(uid: str, db: firestore.Client) -> int:
+    """
+    Marks all tasks for a given user as needing ranking and enqueues ranking jobs.
+    """
+    tasks_col = db.collection("users").document(uid).collection("tasks")
+    tasks_docs = tasks_col.stream()
+    count = 0
+    for doc_snap in tasks_docs:
+        doc_snap.reference.set(
+            {"priority_needs_updated": True, "updated_at": firestore.SERVER_TIMESTAMP},
+            merge=True,
+        )
+        enqueue_task_ranking(uid=uid, task_id=doc_snap.id, db=db)
+        count += 1
+    return count
+
+
+def cleanup_repo_tasks(uid: str, repo_full_name: str, db: firestore.Client) -> None:
+    """
+    Cleans up tasks for a repository that was removed from monitored_repos.
+    If a task is only present because of the monitored repository (sources == ["monitored"] or empty),
+    it is deleted. If it also came from other sources (e.g. assigned, mentioned), 'monitored' is removed
+    and the task is preserved.
+    """
+    repo_clean = repo_full_name.strip().strip("/")
+    if not repo_clean or "/" not in repo_clean:
+        return
+    owner_target, repo_target = repo_clean.split("/", 1)
+
+    tasks_col = db.collection("users").document(uid).collection("tasks")
+    tasks_docs = tasks_col.stream()
+    for doc_snap in tasks_docs:
+        raw_dict = doc_snap.to_dict() or {}
+        task = Task.model_validate(raw_dict)
+        if task.owner == owner_target and task.repo == repo_target:
+            if "monitored" in task.sources:
+                task.sources.remove("monitored")
+            if not task.sources:
+                doc_snap.reference.delete()
+            else:
+                doc_snap.reference.set(
+                    {"sources": task.sources, "updated_at": firestore.SERVER_TIMESTAMP},
+                    merge=True,
+                )
 
 
 def update_task_priority(uid: str, task_id: str, db: firestore.Client) -> None:

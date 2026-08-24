@@ -19,8 +19,16 @@ from google.cloud import firestore
 from google.cloud.firestore import SERVER_TIMESTAMP
 
 from auth_utils import extract_provider_info, fetch_full_user_auth_record, verify_bearer_token
-from github_sync import start_user_github_sync, sync_all_users_closed_issues
-from task import enqueue_task_ranking, force_rerank_tasks, get_user_tasks, update_task_priority
+from github_sync import enqueue_issue_page_sync, start_user_github_sync, sync_all_users_closed_issues
+from task import (
+    cleanup_repo_tasks,
+    delete_all_user_tasks,
+    enqueue_task_ranking,
+    force_rerank_tasks,
+    get_user_tasks,
+    mark_all_tasks_for_reranking,
+    update_task_priority,
+)
 from user import User
 
 # Jinja2 Environment for server-side HTML rendering
@@ -698,8 +706,11 @@ def on_user_settings_changed(
     event: firestore_fn.Event[firestore_fn.Change[firestore_fn.DocumentSnapshot | None]],
 ) -> None:
     """
-    Cloud Firestore trigger that invokes start_user_github_sync if the user's
-    settings (github_access_token or monitored_repos) are newly created or changed.
+    Cloud Firestore trigger that handles targeted lifecycle actions when user settings change:
+    1. If GitHub access token changes (or is newly added): discard all tasks and perform a full sync.
+    2. If Gemini API key changes: mark every task as needing re-ranked and enqueue ranking.
+    3. If new repo(s) added: enqueue sync task for only the newly added repo(s).
+    4. If repo(s) removed: cleanup tasks associated with removed repo(s) (preserving tasks with other sources).
     """
     if event.data is None or event.data.after is None:
         return
@@ -711,6 +722,11 @@ def on_user_settings_changed(
     if not after_snap.exists:
         return
 
+    uid_param = event.params.get("uid")
+    if not uid_param:
+        return
+    uid = str(uid_param)
+
     after_data = after_snap.to_dict() or {}
     before_data = {}
     is_new = (before_snap is None) or not before_snap.exists
@@ -719,21 +735,56 @@ def on_user_settings_changed(
 
     after_token = after_data.get("github_access_token")
     before_token = before_data.get("github_access_token")
+    after_gemini = after_data.get("gemini_api_key")
+    before_gemini = before_data.get("gemini_api_key")
 
-    after_repos = sorted((after_data.get("monitored_repos") or {}).keys())
-    before_repos = sorted((before_data.get("monitored_repos") or {}).keys())
+    after_repos = set((after_data.get("monitored_repos") or {}).keys())
+    before_repos = set((before_data.get("monitored_repos") or {}).keys())
 
-    if not after_token:
-        return
-
-    token_changed = after_token != before_token
-    repos_changed = after_repos != before_repos
-
-    if is_new or token_changed or repos_changed:
-        uid = event.params.get("uid")
-        if uid:
-            user = User.model_validate({**after_data, "uid": str(uid)})
+    # Case 1: GitHub Access Token changed / added / removed
+    if is_new or (after_token != before_token):
+        if after_token:
+            delete_all_user_tasks(uid=uid, db=db)
+            user = User.model_validate({**after_data, "uid": uid})
+            # Reset sync timestamps to trigger full sync
+            user.last_assigned_sync = None
+            user.last_mentioned_sync = None
+            user.last_created_sync = None
+            user.monitored_repos = {r: None for r in after_repos}
             start_user_github_sync(user=user, db=db, state="open")
+            return
+        else:
+            # Token removed
+            delete_all_user_tasks(uid=uid, db=db)
+            return
+
+    # Case 2: Gemini API Key changed
+    if after_gemini != before_gemini and after_gemini:
+        mark_all_tasks_for_reranking(uid=uid, db=db)
+
+    # Case 3: Monitored repos added
+    added_repos = after_repos - before_repos
+    for repo_clean in added_repos:
+        repo_clean = repo_clean.strip().strip("/")
+        if not repo_clean or "/" not in repo_clean:
+            continue
+        owner_part, repo_part = repo_clean.split("/", 1)
+        enqueue_issue_page_sync(
+            uid=uid,
+            db=db,
+            repo_full_name=repo_clean,
+            state="open",
+            since=None,
+            page=0,
+            per_page=100,
+            owner_fallback=owner_part,
+            repo_fallback=repo_part,
+        )
+
+    # Case 4: Monitored repos removed
+    removed_repos = before_repos - after_repos
+    for repo_clean in removed_repos:
+        cleanup_repo_tasks(uid=uid, repo_full_name=repo_clean, db=db)
 
 
 # ============================================================================

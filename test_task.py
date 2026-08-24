@@ -7,7 +7,7 @@ ranker execution, asynchronous Firebase task_queue enqueuing, and decoupled forc
 import os
 import sys
 import unittest
-from unittest.mock import MagicMock, patch
+from unittest.mock import ANY, MagicMock, patch
 
 # Add functions to path
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "functions"))
@@ -23,10 +23,13 @@ from genai_ranker import (
 from github_sync import IssuePayload
 from task import (
     Task,
+    cleanup_repo_tasks,
+    delete_all_user_tasks,
     enqueue_task_ranking,
     ensure_task_for_issue,
     force_rerank_tasks,
     get_user_tasks,
+    mark_all_tasks_for_reranking,
     update_task_priority,
 )
 
@@ -465,6 +468,122 @@ class TestTaskQueueFunction(unittest.TestCase):
         with self.assertRaises(tasks_fn.HttpsError) as ctx:
             handler(mock_req)
         self.assertEqual(ctx.exception.code, tasks_fn.FunctionsErrorCode.INVALID_ARGUMENT)
+
+
+class TestTaskLifecycleAndSourceTracking(unittest.TestCase):
+    def test_ensure_task_for_issue_tracks_sources(self):
+        mock_db = MagicMock()
+        mock_user_doc = MagicMock()
+        mock_tasks_col = MagicMock()
+        mock_task_ref = MagicMock()
+        mock_doc_snap = MagicMock()
+
+        mock_db.collection.return_value.document.return_value = mock_user_doc
+        mock_user_doc.collection.return_value = mock_tasks_col
+        mock_tasks_col.document.return_value = mock_task_ref
+        mock_task_ref.get.return_value = mock_doc_snap
+
+        # Case 1: Initial creation with source 'assigned'
+        mock_doc_snap.exists = False
+        ensure_task_for_issue(
+            uid="user_src_1",
+            issue_id="org_repo_1",
+            issue_data={"title": "Issue", "url": "https://url", "owner": "org", "repo": "repo", "issue_number": 1},
+            db=mock_db,
+            source="assigned",
+        )
+        call_args, _ = mock_task_ref.set.call_args
+        self.assertEqual(call_args[0]["sources"], ["assigned"])
+
+        # Case 2: Subsequent update adds source 'monitored'
+        mock_doc_snap.exists = True
+        mock_doc_snap.to_dict.return_value = {
+            "owner": "org",
+            "repo": "repo",
+            "issue_number": 1,
+            "sources": ["assigned"],
+        }
+        ensure_task_for_issue(
+            uid="user_src_1",
+            issue_id="org_repo_1",
+            issue_data={"title": "Issue", "url": "https://url", "owner": "org", "repo": "repo", "issue_number": 1},
+            db=mock_db,
+            source="monitored",
+        )
+        call_args, _ = mock_task_ref.set.call_args
+        self.assertEqual(sorted(call_args[0]["sources"]), ["assigned", "monitored"])
+
+    def test_delete_all_user_tasks(self):
+        mock_db = MagicMock()
+        mock_tasks_col = MagicMock()
+        mock_db.collection.return_value.document.return_value.collection.return_value = mock_tasks_col
+
+        doc1 = MagicMock()
+        doc2 = MagicMock()
+        mock_tasks_col.stream.return_value = [doc1, doc2]
+
+        deleted_count = delete_all_user_tasks("user_del_1", mock_db)
+        self.assertEqual(deleted_count, 2)
+        doc1.reference.delete.assert_called_once()
+        doc2.reference.delete.assert_called_once()
+
+    @patch("task.enqueue_task_ranking")
+    def test_mark_all_tasks_for_reranking(self, mock_enqueue):
+        mock_db = MagicMock()
+        mock_tasks_col = MagicMock()
+        mock_db.collection.return_value.document.return_value.collection.return_value = mock_tasks_col
+
+        doc1 = MagicMock()
+        doc1.id = "task_doc_1"
+        mock_tasks_col.stream.return_value = [doc1]
+
+        count = mark_all_tasks_for_reranking("user_rerank_1", mock_db)
+        self.assertEqual(count, 1)
+        doc1.reference.set.assert_called_once_with(
+            {"priority_needs_updated": True, "updated_at": ANY},
+            merge=True,
+        )
+        mock_enqueue.assert_called_once_with(uid="user_rerank_1", task_id="task_doc_1", db=mock_db)
+
+    def test_cleanup_repo_tasks_deletes_monitored_only_tasks(self):
+        mock_db = MagicMock()
+        mock_tasks_col = MagicMock()
+        mock_db.collection.return_value.document.return_value.collection.return_value = mock_tasks_col
+
+        # Task 1: Only from monitored repo -> should be deleted
+        doc1 = MagicMock()
+        doc1.to_dict.return_value = {
+            "owner": "org",
+            "repo": "repo1",
+            "issue_number": 1,
+            "sources": ["monitored"],
+        }
+
+        # Task 2: From monitored repo AND assigned -> should be preserved with 'monitored' removed
+        doc2 = MagicMock()
+        doc2.to_dict.return_value = {
+            "owner": "org",
+            "repo": "repo1",
+            "issue_number": 2,
+            "sources": ["assigned", "monitored"],
+        }
+
+        # Task 3: Different repo -> untouched
+        doc3 = MagicMock()
+        doc3.to_dict.return_value = {
+            "owner": "other",
+            "repo": "other_repo",
+            "issue_number": 3,
+            "sources": ["monitored"],
+        }
+
+        mock_tasks_col.stream.return_value = [doc1, doc2, doc3]
+
+        cleanup_repo_tasks(uid="user_cleanup_1", repo_full_name="org/repo1", db=mock_db)
+        doc1.reference.delete.assert_called_once()
+        doc2.reference.set.assert_called_once_with({"sources": ["assigned"], "updated_at": ANY}, merge=True)
+        doc3.reference.delete.assert_not_called()
+        doc3.reference.set.assert_not_called()
 
 
 if __name__ == "__main__":

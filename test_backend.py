@@ -406,9 +406,10 @@ class TestJinjaSettingsPageCRUD(unittest.TestCase):
 
 
 class TestFirestoreUserSettingsTrigger(unittest.TestCase):
+    @patch("main.delete_all_user_tasks")
     @patch("main.start_user_github_sync")
     @patch("main.db")
-    def test_trigger_invoked_when_settings_newly_created(self, mock_db, mock_start_sync):
+    def test_trigger_invoked_when_settings_newly_created(self, mock_db, mock_start_sync, mock_delete_tasks):
         handler = get_callable_handler(main.on_user_settings_changed)
 
         mock_event = MagicMock()
@@ -428,15 +429,17 @@ class TestFirestoreUserSettingsTrigger(unittest.TestCase):
         mock_event.data.after = mock_after
 
         handler(mock_event)
+        mock_delete_tasks.assert_called_once_with(uid="user_new_trig_0", db=mock_db)
         mock_start_sync.assert_called_once()
         call_user = mock_start_sync.call_args[1]["user"]
         self.assertEqual(call_user.uid, "user_new_trig_0")
         self.assertEqual(call_user.github_access_token, "ghp_brand_new_token_123")
         self.assertEqual(call_user.monitored_repos, {"brianquinlan/marathon2": None})
 
+    @patch("main.delete_all_user_tasks")
     @patch("main.start_user_github_sync")
     @patch("main.db")
-    def test_trigger_invoked_when_token_changed(self, mock_db, mock_start_sync):
+    def test_trigger_invoked_when_token_changed(self, mock_db, mock_start_sync, mock_delete_tasks):
         handler = get_callable_handler(main.on_user_settings_changed)
 
         mock_event = MagicMock()
@@ -458,14 +461,15 @@ class TestFirestoreUserSettingsTrigger(unittest.TestCase):
         mock_event.data.after = mock_after
 
         handler(mock_event)
+        mock_delete_tasks.assert_called_once_with(uid="user_trig_1", db=mock_db)
         mock_start_sync.assert_called_once()
         call_user = mock_start_sync.call_args[1]["user"]
         self.assertEqual(call_user.uid, "user_trig_1")
         self.assertEqual(call_user.github_access_token, "ghp_new_token")
 
-    @patch("main.start_user_github_sync")
+    @patch("main.enqueue_issue_page_sync")
     @patch("main.db")
-    def test_trigger_invoked_when_monitored_repos_changed(self, mock_db, mock_start_sync):
+    def test_trigger_invoked_when_monitored_repo_added(self, mock_db, mock_enqueue_issue):
         handler = get_callable_handler(main.on_user_settings_changed)
 
         mock_event = MagicMock()
@@ -487,7 +491,71 @@ class TestFirestoreUserSettingsTrigger(unittest.TestCase):
         mock_event.data.after = mock_after
 
         handler(mock_event)
-        mock_start_sync.assert_called_once()
+        mock_enqueue_issue.assert_called_once_with(
+            uid="user_trig_2",
+            db=mock_db,
+            repo_full_name="org/repo2",
+            state="open",
+            since=None,
+            page=0,
+            per_page=100,
+            owner_fallback="org",
+            repo_fallback="repo2",
+        )
+
+    @patch("main.cleanup_repo_tasks")
+    @patch("main.db")
+    def test_trigger_invoked_when_monitored_repo_removed(self, mock_db, mock_cleanup):
+        handler = get_callable_handler(main.on_user_settings_changed)
+
+        mock_event = MagicMock()
+        mock_event.params = {"uid": "user_trig_remove"}
+
+        mock_before = MagicMock()
+        mock_before.to_dict.return_value = {
+            "github_access_token": "ghp_token_same",
+            "monitored_repos": {"org/repo1": None, "org/repo2": None},
+        }
+
+        mock_after = MagicMock()
+        mock_after.to_dict.return_value = {
+            "github_access_token": "ghp_token_same",
+            "monitored_repos": {"org/repo1": None},
+        }
+
+        mock_event.data.before = mock_before
+        mock_event.data.after = mock_after
+
+        handler(mock_event)
+        mock_cleanup.assert_called_once_with(uid="user_trig_remove", repo_full_name="org/repo2", db=mock_db)
+
+    @patch("main.mark_all_tasks_for_reranking")
+    @patch("main.db")
+    def test_trigger_invoked_when_gemini_key_changed(self, mock_db, mock_mark_rerank):
+        handler = get_callable_handler(main.on_user_settings_changed)
+
+        mock_event = MagicMock()
+        mock_event.params = {"uid": "user_trig_gemini"}
+
+        mock_before = MagicMock()
+        mock_before.to_dict.return_value = {
+            "github_access_token": "ghp_token_same",
+            "gemini_api_key": "AIzaOldKey",
+            "monitored_repos": {"org/repo1": None},
+        }
+
+        mock_after = MagicMock()
+        mock_after.to_dict.return_value = {
+            "github_access_token": "ghp_token_same",
+            "gemini_api_key": "AIzaNewKey",
+            "monitored_repos": {"org/repo1": None},
+        }
+
+        mock_event.data.before = mock_before
+        mock_event.data.after = mock_after
+
+        handler(mock_event)
+        mock_mark_rerank.assert_called_once_with(uid="user_trig_gemini", db=mock_db)
 
     @patch("main.start_user_github_sync")
     @patch("main.db")

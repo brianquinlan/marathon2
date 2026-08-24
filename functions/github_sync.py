@@ -131,6 +131,7 @@ def process_and_save_issue_page(
     db: firestore.Client,
     owner_fallback: str | None = None,
     repo_fallback: str | None = None,
+    source: str | None = None,
 ) -> None:
     """
     Processes a page of GitHub issues for a given user and directly creates or updates
@@ -162,7 +163,13 @@ def process_and_save_issue_page(
         }
 
         # Create/update Task directly in Firestore
-        ensure_task_for_issue(uid=uid, issue_id=doc_id, issue_data=issue_payload, db=db)
+        ensure_task_for_issue(
+            uid=uid,
+            issue_id=doc_id,
+            issue_data=issue_payload,
+            db=db,
+            source=source,
+        )
 
 
 def execute_issue_page_sync(
@@ -202,12 +209,14 @@ def execute_issue_page_sync(
         page=page,
         per_page=per_page,
     )
+    source = "monitored" if repo_full_name else (filter_name or "assigned")
     process_and_save_issue_page(
         uid=uid,
         issues=items,
         db=db,
         owner_fallback=owner_fallback,
         repo_fallback=repo_fallback,
+        source=source,
     )
 
     # Chain next page of issues if present
