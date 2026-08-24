@@ -45,12 +45,12 @@ def _parse_github_datetime(dt_val: object) -> datetime | None:
 # ============================================================================
 
 
-def get_github_client(access_token: str) -> Github:
+def get_github_client(access_token: str, per_page: int = 100) -> Github:
     """
-    Creates an authenticated PyGithub client instance.
+    Creates an authenticated PyGithub client instance configured with default per_page.
     """
     auth = Auth.Token(access_token)
-    return Github(auth=auth, timeout=20, user_agent="Firebase-GitHub-Sync-App")
+    return Github(auth=auth, per_page=per_page, timeout=20, user_agent="Firebase-GitHub-Sync-App")
 
 
 # ============================================================================
@@ -72,6 +72,7 @@ def fetch_single_issue_page(
     Returns (items, has_next_page).
     """
     try:
+        client.per_page = per_page
         if repo_full_name:
             repo = client.get_repo(repo_full_name)
             paginated: PaginatedList[PyghIssue] = repo.get_issues(

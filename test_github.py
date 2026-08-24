@@ -18,6 +18,7 @@ from github_sync import (
     fetch_github_user_login,
     fetch_issue_in_memory,
     fetch_single_issue_page,
+    get_github_client,
     process_and_save_issue_page,
     start_user_github_sync,
     sync_closed_issues_for_user,
@@ -40,6 +41,10 @@ class TestGitHubDataStructures(unittest.TestCase):
 
 
 class TestSinglePageFetchingAndPagination(unittest.TestCase):
+    def test_get_github_client_default_per_page(self):
+        client = get_github_client("fake_token")
+        self.assertEqual(client.per_page, 100)
+
     def test_fetch_single_issue_page_with_next_page(self):
         mock_client = MagicMock()
         mock_user = MagicMock()
@@ -58,6 +63,7 @@ class TestSinglePageFetchingAndPagination(unittest.TestCase):
             page=0,
             per_page=100,
         )
+        self.assertEqual(mock_client.per_page, 100)
         self.assertEqual(len(items), 100)
         self.assertTrue(has_next)
 
