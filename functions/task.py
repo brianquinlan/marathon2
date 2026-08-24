@@ -54,24 +54,17 @@ def enqueue_task_ranking(
     db: firestore.Client,
     function_name: str = "rank_user_tasks",
     opts: admin_functions.TaskOptions | None = None,
-) -> dict[str, object]:
+) -> None:
     """
     Enqueues a task to the Firebase Task Queue function using the task queue abstraction.
     Dispatches a payload with the user UID and task document ID.
     """
-    enqueued_id = dispatch_task(
+    dispatch_task(
         queue_name=function_name,
         task_data={"uid": uid, "task_id": task_id},
         worker_fn=lambda: update_task_priority(uid=uid, task_id=task_id, db=db),
         opts=opts,
     )
-    return {
-        "status": "enqueued",
-        "task_id": enqueued_id,
-        "target_task_id": task_id,
-        "queue": function_name,
-        "uid": uid,
-    }
 
 
 # ============================================================================
@@ -79,7 +72,7 @@ def enqueue_task_ranking(
 # ============================================================================
 
 
-def ensure_task_for_issue(uid: str, issue_id: str, issue_data: dict[str, object], db: firestore.Client) -> Task:
+def ensure_task_for_issue(uid: str, issue_id: str, issue_data: dict[str, object], db: firestore.Client) -> None:
     """
     Creates or updates the Task associated with a given issue in Firestore under users/{uid}/tasks.
     When an issue is modified or created, priority_needs_updated is set to True.
@@ -126,10 +119,9 @@ def ensure_task_for_issue(uid: str, issue_id: str, issue_data: dict[str, object]
     if task.created_at is None:
         task_data["created_at"] = firestore.SERVER_TIMESTAMP
     task_ref.set(task_data, merge=True)
-    return task
 
 
-def update_task_priority(uid: str, task_id: str, db: firestore.Client) -> dict[str, object]:
+def update_task_priority(uid: str, task_id: str, db: firestore.Client) -> None:
     """
     Retrieves a single task from Firestore for a given user, loads its associated
     GitHub issue and comments in-memory using the user's github_access_token, calls the
@@ -140,7 +132,7 @@ def update_task_priority(uid: str, task_id: str, db: firestore.Client) -> dict[s
     doc_snap = task_ref.get()
     if not doc_snap.exists:
         logger.warning(f"[UPDATE_TASK_PRIORITY] Task document {task_id} NOT found for UID {uid}.")
-        return {"status": "not_found", "task_id": task_id, "uid": uid}
+        return
 
     raw_task_data = doc_snap.to_dict()
     if not isinstance(raw_task_data, dict):
@@ -230,13 +222,6 @@ def update_task_priority(uid: str, task_id: str, db: firestore.Client) -> dict[s
     logger.info(
         f"[UPDATE_TASK_PRIORITY] Successfully updated priority for task {task_id} for user {uid} -> {ranked_task.priority:.2f}."
     )
-    return {
-        "status": "success",
-        "task_id": task_id,
-        "uid": uid,
-        "priority": ranked_task.priority,
-        "task": ranked_task.model_dump(mode="json"),
-    }
 
 
 def force_rerank_tasks(uid: str, db: firestore.Client) -> dict[str, object]:

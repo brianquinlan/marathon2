@@ -224,16 +224,13 @@ class TestTaskQueueSyncHandlers(unittest.TestCase):
             ],
             "https://api.github.com/issues?page=2",
         )
-        mock_save_page.return_value = ["o_r_100"]
 
         mock_req = MagicMock(spec=tasks_fn.CallableRequest)
         mock_req.data = {"uid": "user_q_1", "url": "https://api.github.com/issues", "reason": "assigned"}
 
         result = handler(mock_req)
-        assert isinstance(result, dict)
-        self.assertEqual(result["status"], "success")
-        self.assertEqual(result["saved_count"], 1)
-        self.assertEqual(result["next_url"], "https://api.github.com/issues?page=2")
+        self.assertIsNone(result)
+        mock_save_page.assert_called_once()
         mock_enqueue_issue.assert_called_once()
 
 

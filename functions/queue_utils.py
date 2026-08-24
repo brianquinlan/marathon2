@@ -41,7 +41,7 @@ def dispatch_task(
     task_data: dict[str, object],
     worker_fn: Callable[[], object],
     opts: admin_functions.TaskOptions | None = None,
-) -> str:
+) -> None:
     """
     Dispatches a task to the Cloud Tasks queue in production, or runs worker_fn in a daemon thread
     when running under the Firebase Emulator (or as a fallback if Cloud Tasks is unavailable).
@@ -50,14 +50,13 @@ def dispatch_task(
         logger.info(f"Firebase Emulator detected. Dispatching task for queue '{queue_name}' via thread.")
         t = threading.Thread(target=_safe_run_worker, args=(worker_fn, queue_name), daemon=True)
         t.start()
-        return "thread_dispatched"
+        return
 
     try:
         queue = admin_functions.task_queue(queue_name)
         task_opts = opts or admin_functions.TaskOptions(dispatch_deadline_seconds=300)
         task_id = queue.enqueue(task_data, opts=task_opts)
         logger.info(f"Enqueued Firebase task '{task_id}' in queue '{queue_name}'")
-        return str(task_id)
     except Exception as e:
         logger.warning(
             f"Firebase task_queue.enqueue exception ({e}) for queue '{queue_name}'. "
@@ -65,4 +64,3 @@ def dispatch_task(
         )
         t = threading.Thread(target=_safe_run_worker, args=(worker_fn, queue_name), daemon=True)
         t.start()
-        return "thread_dispatched"

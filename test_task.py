@@ -69,8 +69,7 @@ class TestQueueUtils(unittest.TestCase):
         mock_thread_instance = MagicMock()
         mock_thread_cls.return_value = mock_thread_instance
 
-        res = dispatch_task(queue_name="test_queue", task_data={"foo": "bar"}, worker_fn=mock_worker)
-        self.assertEqual(res, "thread_dispatched")
+        dispatch_task(queue_name="test_queue", task_data={"foo": "bar"}, worker_fn=mock_worker)
         mock_thread_cls.assert_called_once()
         self.assertTrue(mock_thread_cls.call_args[1].get("daemon"))
         mock_thread_instance.start.assert_called_once()
@@ -83,8 +82,7 @@ class TestQueueUtils(unittest.TestCase):
         mock_task_queue.return_value = mock_queue
 
         mock_worker = MagicMock()
-        res = dispatch_task(queue_name="prod_queue", task_data={"uid": "u1"}, worker_fn=mock_worker)
-        self.assertEqual(res, "prod_task_123")
+        dispatch_task(queue_name="prod_queue", task_data={"uid": "u1"}, worker_fn=mock_worker)
         mock_task_queue.assert_called_once_with("prod_queue")
         mock_queue.enqueue.assert_called_once()
 
@@ -97,8 +95,7 @@ class TestQueueUtils(unittest.TestCase):
         mock_thread_instance = MagicMock()
         mock_thread_cls.return_value = mock_thread_instance
 
-        res = dispatch_task(queue_name="fallback_queue", task_data={"uid": "u1"}, worker_fn=mock_worker)
-        self.assertEqual(res, "thread_dispatched")
+        dispatch_task(queue_name="fallback_queue", task_data={"uid": "u1"}, worker_fn=mock_worker)
         mock_thread_instance.start.assert_called_once()
 
     def test_safe_run_worker_handles_exception(self):
@@ -285,7 +282,7 @@ class TestTaskFirestoreOperations(unittest.TestCase):
 
         # Case 1: Task does not exist yet (brand new issue -> sets priority_needs_updated = True)
         mock_doc_snap.exists = False
-        task = ensure_task_for_issue(
+        ensure_task_for_issue(
             uid="user_100",
             issue_id="org_repo_1",
             issue_data={
@@ -297,11 +294,11 @@ class TestTaskFirestoreOperations(unittest.TestCase):
             },
             db=mock_db,
         )
-        self.assertEqual(task.doc_id, "task_org_repo_1")
-        self.assertTrue(task.priority_needs_updated)
-        self.assertEqual(task.github_issue_title, "Brand new issue")
-        self.assertEqual(task.github_issue_url, "https://github.com/org/repo/issues/1")
         mock_task_ref.set.assert_called_once()
+        args, _ = mock_task_ref.set.call_args
+        self.assertTrue(args[0]["priority_needs_updated"])
+        self.assertEqual(args[0]["github_issue_title"], "Brand new issue")
+        self.assertEqual(args[0]["github_issue_url"], "https://github.com/org/repo/issues/1")
 
         # Case 2: Task already exists (modified issue -> sets priority_needs_updated = True)
         mock_doc_snap.exists = True
@@ -315,16 +312,17 @@ class TestTaskFirestoreOperations(unittest.TestCase):
         }
         mock_task_ref.set.reset_mock()
 
-        updated_task = ensure_task_for_issue(
+        ensure_task_for_issue(
             uid="user_100",
             issue_id="org_repo_1",
             issue_data={"title": "Updated issue title", "url": "https://github.com/org/repo/issues/1"},
             db=mock_db,
         )
-        self.assertTrue(updated_task.priority_needs_updated)
-        self.assertEqual(updated_task.github_issue_title, "Updated issue title")
-        self.assertEqual(updated_task.priority, 0.7)
         mock_task_ref.set.assert_called_once()
+        args, _ = mock_task_ref.set.call_args
+        self.assertTrue(args[0]["priority_needs_updated"])
+        self.assertEqual(args[0]["github_issue_title"], "Updated issue title")
+        self.assertEqual(args[0]["priority"], 0.7)
 
     @patch("github_sync.fetch_issue_in_memory")
     @patch("task.run_ranker")
@@ -368,10 +366,7 @@ class TestTaskFirestoreOperations(unittest.TestCase):
         ranked_mock_task = Task(owner="org", repo="repo", issue_number=10, priority=0.88, priority_needs_updated=False)
         mock_run_ranker.return_value = ranked_mock_task
 
-        result = update_task_priority("user_100", "task_issue_10", mock_db)
-        self.assertEqual(result["status"], "success")
-        self.assertEqual(result["task_id"], "task_issue_10")
-        self.assertEqual(result["priority"], 0.88)
+        update_task_priority("user_100", "task_issue_10", mock_db)
         mock_fetch_in_memory.assert_called_once_with(
             access_token="ghp_valid_token_123",
             owner="org",
@@ -384,6 +379,9 @@ class TestTaskFirestoreOperations(unittest.TestCase):
         self.assertEqual(kwargs.get("gemini_api_key"), "AIzaSyUserDocKey")
         self.assertEqual(kwargs.get("issue"), mock_in_memory_issue)
         mock_task_ref.set.assert_called_once()
+        args, _ = mock_task_ref.set.call_args
+        self.assertEqual(args[0]["priority"], 0.88)
+        self.assertFalse(args[0]["priority_needs_updated"])
 
     def test_force_rerank_tasks_marks(self):
         mock_db = MagicMock()
@@ -413,15 +411,7 @@ class TestTaskFirestoreOperations(unittest.TestCase):
         mock_task_queue.return_value = mock_queue
 
         mock_db = MagicMock()
-        res = enqueue_task_ranking(
-            uid="user_task_queue_1", task_id="task_abc_1", db=mock_db, function_name="rank_user_tasks"
-        )
-        self.assertEqual(res["status"], "enqueued")
-        self.assertEqual(res["task_id"], "task_id_xyz_123")
-        self.assertEqual(res["target_task_id"], "task_abc_1")
-        self.assertEqual(res["queue"], "rank_user_tasks")
-        self.assertEqual(res["uid"], "user_task_queue_1")
-
+        enqueue_task_ranking(uid="user_task_queue_1", task_id="task_abc_1", db=mock_db, function_name="rank_user_tasks")
         mock_task_queue.assert_called_once_with("rank_user_tasks")
         mock_queue.enqueue.assert_called_once()
         args, _kwargs = mock_queue.enqueue.call_args
@@ -434,11 +424,7 @@ class TestTaskFirestoreOperations(unittest.TestCase):
         mock_thread_instance = MagicMock()
         mock_thread_cls.return_value = mock_thread_instance
 
-        res = enqueue_task_ranking(uid="user_async_1", task_id="task_fallback_1", db=mock_db)
-        self.assertEqual(res["status"], "enqueued")
-        self.assertEqual(res["task_id"], "thread_dispatched")
-        self.assertEqual(res["uid"], "user_async_1")
-        self.assertEqual(res["target_task_id"], "task_fallback_1")
+        enqueue_task_ranking(uid="user_async_1", task_id="task_fallback_1", db=mock_db)
         mock_thread_instance.start.assert_called_once()
 
     def test_get_user_tasks_sorted_by_priority(self):
@@ -470,19 +456,12 @@ class TestTaskQueueFunction(unittest.TestCase):
     @patch("main.db")
     def test_rank_user_tasks_task_queue_handler(self, mock_db, mock_update_fn):
         handler = get_callable_handler(main.rank_user_tasks)
-        mock_update_fn.return_value = {
-            "status": "success",
-            "task_id": "task_queue_001",
-            "uid": "user_queue_001",
-            "priority": 0.88,
-        }
 
         mock_req = MagicMock(spec=tasks_fn.CallableRequest)
         mock_req.data = {"uid": "user_queue_001", "task_id": "task_queue_001"}
 
         result = handler(mock_req)
-        assert isinstance(result, dict)
-        self.assertEqual(result["status"], "success")
+        self.assertIsNone(result)
         mock_update_fn.assert_called_once_with(uid="user_queue_001", task_id="task_queue_001", db=mock_db)
 
     def test_rank_user_tasks_missing_uid_raises_error(self):

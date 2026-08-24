@@ -450,7 +450,7 @@ def sync_github_issues(req: https_fn.CallableRequest) -> dict[str, object]:
     retry_config=options.RetryConfig(max_attempts=3, min_backoff_seconds=10, max_backoff_seconds=300, max_doublings=3),
     rate_limits=options.RateLimits(max_concurrent_dispatches=10, max_dispatches_per_second=10),
 )
-def sync_github_issues_page(req: tasks_fn.CallableRequest) -> dict[str, object]:
+def sync_github_issues_page(req: tasks_fn.CallableRequest) -> None:
     """
     Processes one page of GitHub issues for a given user, updates Tasks in Firestore,
     and chains to the next page if available.
@@ -476,7 +476,7 @@ def sync_github_issues_page(req: tasks_fn.CallableRequest) -> dict[str, object]:
 
     from github_sync import execute_issue_page_sync
 
-    return execute_issue_page_sync(
+    execute_issue_page_sync(
         uid=uid,
         url=url,
         params=params if params else None,
@@ -496,7 +496,7 @@ def sync_github_issues_page(req: tasks_fn.CallableRequest) -> dict[str, object]:
     retry_config=options.RetryConfig(max_attempts=3, min_backoff_seconds=10, max_backoff_seconds=300, max_doublings=3),
     rate_limits=options.RateLimits(max_concurrent_dispatches=5, max_dispatches_per_second=10),
 )
-def rank_user_tasks(req: tasks_fn.CallableRequest) -> dict[str, object]:
+def rank_user_tasks(req: tasks_fn.CallableRequest) -> None:
     """
     Firebase Task Queue function for asynchronous ranking of a single task.
     Dispatched via Cloud Tasks when a task's priority needs update.
@@ -512,8 +512,7 @@ def rank_user_tasks(req: tasks_fn.CallableRequest) -> dict[str, object]:
         )
 
     logger.info(f"Executing asynchronous ranking for task {task_id} (UID {uid}) in Task Queue worker.")
-    result = update_task_priority(uid=uid, task_id=task_id, db=db)
-    return result
+    update_task_priority(uid=uid, task_id=task_id, db=db)
 
 
 # ============================================================================
@@ -692,8 +691,7 @@ def scheduled_sync_closed_issues(event: scheduler_fn.ScheduledEvent) -> None:
     and remove them from users' task lists in Firestore.
     """
     logger.info("Starting scheduled 5-minute sync for closed GitHub issues.")
-    res = sync_all_users_closed_issues(db=db)
-    logger.info(f"Completed scheduled sync for closed issues: {res}")
+    sync_all_users_closed_issues(db=db)
 
 
 # ============================================================================

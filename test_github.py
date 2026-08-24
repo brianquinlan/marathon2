@@ -146,8 +146,7 @@ class TestPageProcessingAndDirectTaskCreation(unittest.TestCase):
         ]
 
         with patch("github_sync.ensure_task_for_issue") as mock_ensure_task:
-            saved_ids = process_and_save_issue_page(uid="user_123", raw_items=raw_items, reason="assigned", db=mock_db)
-            self.assertEqual(saved_ids, ["org_repo_10", "org_repo_11"])
+            process_and_save_issue_page(uid="user_123", raw_items=raw_items, reason="assigned", db=mock_db)
             self.assertEqual(mock_ensure_task.call_count, 2)
             # Verify ensure_task_for_issue was called with correct payload
             call1_args = mock_ensure_task.call_args_list[0][1]
@@ -249,10 +248,7 @@ class TestClosedIssuesSync(unittest.TestCase):
             uid="user_closed_1", github_access_token="gho_test_closed", monitored_repos=["brianquinlan/marathon2"]
         )
 
-        res = sync_closed_issues_for_user(user=user, db=mock_db)
-
-        self.assertEqual(res["status"], "success")
-        self.assertEqual(res["closed_issues_count"], 1)
+        sync_closed_issues_for_user(user=user, db=mock_db)
         mock_task_ref.delete.assert_called_once()
 
 
@@ -265,13 +261,12 @@ class TestEnqueueIssuePageSync(unittest.TestCase):
         mock_task_queue.return_value = mock_queue
 
         mock_db = MagicMock()
-        res = enqueue_issue_page_sync(
+        enqueue_issue_page_sync(
             uid="user_prod_1",
             url="https://api.github.com/issues",
             db=mock_db,
             params={"page": 0},
         )
-        self.assertEqual(res, "issue_task_123")
         mock_task_queue.assert_called_once_with("sync_github_issues_page")
         mock_queue.enqueue.assert_called_once()
 
@@ -282,13 +277,12 @@ class TestEnqueueIssuePageSync(unittest.TestCase):
         mock_thread_cls.return_value = mock_thread_instance
 
         mock_db = MagicMock()
-        res = enqueue_issue_page_sync(
+        enqueue_issue_page_sync(
             uid="user_emu_1",
             url="https://api.github.com/issues",
             db=mock_db,
             params={"page": 1},
         )
-        self.assertEqual(res, "thread_dispatched")
         mock_thread_instance.start.assert_called_once()
 
 

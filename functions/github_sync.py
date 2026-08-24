@@ -260,14 +260,13 @@ def process_and_save_issue_page(
     db: firestore.Client,
     owner_fallback: str | None = None,
     repo_fallback: str | None = None,
-) -> list[str]:
+) -> None:
     """
     Processes a page of GitHub issues for a given user and directly creates or updates
     the associated Task document in Firestore (users/{uid}/tasks/task_{doc_id}).
     Does not store intermediate issue documents in Firestore.
     """
-    saved_doc_ids: list[str] = []
-
+    count = 0
     for item in raw_items:
         raw_num = item.get("number", 0)
         issue_number = int(raw_num) if isinstance(raw_num, (int, str)) and str(raw_num).isdigit() else 0
@@ -294,12 +293,9 @@ def process_and_save_issue_page(
 
         # Create/update Task directly in Firestore
         ensure_task_for_issue(uid=uid, issue_id=doc_id, issue_data=issue_payload, db=db)
-        saved_doc_ids.append(doc_id)
+        count += 1
 
-    logger.info(
-        f"Processed and created/updated tasks for {len(saved_doc_ids)} issues for UID {uid} under reason '{reason}'."
-    )
-    return saved_doc_ids
+    logger.info(f"Processed and created/updated tasks for {count} issues for UID {uid} under reason '{reason}'.")
 
 
 def execute_issue_page_sync(
@@ -310,19 +306,19 @@ def execute_issue_page_sync(
     owner_fallback: str | None,
     repo_fallback: str | None,
     db: firestore.Client,
-) -> dict[str, object]:
+) -> None:
     """
     Executes fetching one page of issues from GitHub and chaining to the next page if available.
     """
     user_ref = db.collection("users").document(uid)
     doc_snap = user_ref.get()
     if not doc_snap.exists:
-        return {"status": "error", "message": "User document not found."}
+        return
 
     raw_user_dict = doc_snap.to_dict() or {}
     user = User.model_validate({**raw_user_dict, "uid": uid})
     if not user.github_access_token:
-        return {"status": "error", "message": "User does not have github_access_token configured."}
+        return
 
     headers = {
         "Authorization": f"Bearer {user.github_access_token}",
@@ -332,18 +328,17 @@ def execute_issue_page_sync(
 
     client = get_github_client(user.github_access_token)
     items, next_url = fetch_single_issue_page(url=url, headers=headers, params=params, client=client)
-    saved_doc_ids = process_and_save_issue_page(
+    process_and_save_issue_page(
         uid=uid, raw_items=items, reason=reason, db=db, owner_fallback=owner_fallback, repo_fallback=repo_fallback
     )
 
     # Chain next page of issues if present
-    next_task_id = None
     if next_url:
         page_val = _safe_int(params.get("page"), default=0) if params else 0
         next_params: dict[str, object] = dict(params) if params else {}
         next_params["page"] = page_val + 1
 
-        next_task_id = enqueue_issue_page_sync(
+        enqueue_issue_page_sync(
             uid=uid,
             url=url,
             params=next_params,
@@ -352,14 +347,7 @@ def execute_issue_page_sync(
             repo_fallback=repo_fallback,
             db=db,
         )
-        logger.info(f"Chained next issue page task {next_task_id} for URL: {next_url}")
-
-    return {
-        "status": "success",
-        "saved_count": len(saved_doc_ids),
-        "next_url": next_url,
-        "next_task_id": next_task_id,
-    }
+        logger.info(f"Chained next issue page task for URL: {next_url}")
 
 
 def enqueue_issue_page_sync(
@@ -370,7 +358,7 @@ def enqueue_issue_page_sync(
     reason: AssociationReason | str = AssociationReason.ASSIGNED,
     owner_fallback: str | None = None,
     repo_fallback: str | None = None,
-) -> str:
+) -> None:
     """
     Enqueues a task to process a page of issues from GitHub using the task queue abstraction.
     Falls back seamlessly to background thread execution if running in the emulator.
@@ -384,7 +372,7 @@ def enqueue_issue_page_sync(
         "owner_fallback": owner_fallback,
         "repo_fallback": repo_fallback,
     }
-    return dispatch_task(
+    dispatch_task(
         queue_name="sync_github_issues_page",
         task_data=task_data,
         worker_fn=lambda: execute_issue_page_sync(
@@ -473,8 +461,8 @@ def start_user_github_sync(user: User, db: firestore.Client, state: str = "open"
             params["since"] = since
 
         url = f"{GITHUB_API_BASE_URL}/issues"
-        tid = enqueue_issue_page_sync(uid=user_uid, url=url, params=params, reason=reason_enum, db=db)
-        enqueued_tasks.append({"reason": reason_enum.value, "url": url, "task_id": tid})
+        enqueue_issue_page_sync(uid=user_uid, url=url, params=params, reason=reason_enum, db=db)
+        enqueued_tasks.append({"reason": reason_enum.value, "url": url})
 
     # 2. Enqueue monitored repository endpoints
     for repo_path in user.monitored_repos:
@@ -492,7 +480,7 @@ def start_user_github_sync(user: User, db: firestore.Client, state: str = "open"
             repo_params["since"] = since
 
         url = f"{GITHUB_API_BASE_URL}/repos/{owner_part}/{repo_part}/issues"
-        tid = enqueue_issue_page_sync(
+        enqueue_issue_page_sync(
             uid=user_uid,
             url=url,
             params=repo_params,
@@ -501,7 +489,7 @@ def start_user_github_sync(user: User, db: firestore.Client, state: str = "open"
             repo_fallback=repo_part,
             db=db,
         )
-        enqueued_tasks.append({"reason": f"monitored:{repo_clean}", "url": url, "task_id": tid})
+        enqueued_tasks.append({"reason": f"monitored:{repo_clean}", "url": url})
 
     # Update sync timestamp on User profile
     now_iso = datetime.now(timezone.utc).isoformat()
@@ -529,14 +517,14 @@ def start_user_github_sync(user: User, db: firestore.Client, state: str = "open"
 # ============================================================================
 
 
-def sync_closed_issues_for_user(user: User, db: firestore.Client, client: Github | None = None) -> dict[str, object]:
+def sync_closed_issues_for_user(user: User, db: firestore.Client, client: Github | None = None) -> None:
     """
     Queries GitHub for issues closed since the last sync via PyGithub
     and deletes the corresponding Task document from users/{uid}/tasks.
     """
     user_uid = user.uid or "unknown"
     if not user.github_access_token:
-        return {"uid": user_uid, "closed_issues_count": 0, "status": "no_token"}
+        return
 
     headers = {
         "Authorization": f"Bearer {user.github_access_token}",
@@ -631,33 +619,20 @@ def sync_closed_issues_for_user(user: User, db: firestore.Client, client: Github
     )
 
     logger.info(f"Closed issue sync completed for UID {user_uid}: {closed_count} tasks removed.")
-    return {"uid": user_uid, "closed_issues_count": closed_count, "sync_time": now_iso, "status": "success"}
 
 
-def sync_all_users_closed_issues(db: firestore.Client) -> dict[str, object]:
+def sync_all_users_closed_issues(db: firestore.Client) -> None:
     """
     Sweeps through all users in Firestore and removes closed issues from their task list.
     """
     users_col = db.collection("users")
     users_docs = users_col.stream()
-    total_closed_tasks_removed = 0
-    users_processed = 0
 
     for doc_snap in users_docs:
         raw_user_dict = doc_snap.to_dict() or {}
         user = User.model_validate({**raw_user_dict, "uid": doc_snap.id})
         if user.github_access_token:
             try:
-                res = sync_closed_issues_for_user(user=user, db=db)
-                raw_count = res.get("closed_issues_count", 0)
-                if isinstance(raw_count, (int, float)):
-                    total_closed_tasks_removed += int(raw_count)
-                users_processed += 1
+                sync_closed_issues_for_user(user=user, db=db)
             except Exception as e:
                 logger.error(f"Error syncing closed issues for UID {user.uid}: {e}")
-
-    logger.info(f"Total {total_closed_tasks_removed} closed tasks removed across {users_processed} users.")
-    return {
-        "users_processed": users_processed,
-        "total_closed_tasks_removed": total_closed_tasks_removed,
-    }
