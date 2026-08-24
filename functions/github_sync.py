@@ -12,16 +12,15 @@ NOTE: Tasks are ONLY created/updated once an Issue and all of its comments are f
 
 import logging
 import re
-import threading
 from collections.abc import Mapping
 from datetime import datetime, timezone
 from enum import Enum
 
-from firebase_admin import functions as admin_functions
 from github import Auth, Github, GithubException, GithubObject
 from github.Issue import Issue as PyghIssue
 from github.PaginatedList import PaginatedList
 from google.cloud import firestore
+from queue_utils import dispatch_task
 
 from genai_ranker import IssuePayload
 from task import ensure_task_for_issue
@@ -373,43 +372,31 @@ def enqueue_issue_page_sync(
     repo_fallback: str | None = None,
 ) -> str:
     """
-    Enqueues a task to process a page of issues from GitHub using Firebase task_queue.
-    Falls back seamlessly to background thread execution if task queue is not available in local environment.
+    Enqueues a task to process a page of issues from GitHub using the task queue abstraction.
+    Falls back seamlessly to background thread execution if running in the emulator.
     """
-    try:
-        queue = admin_functions.task_queue("sync_github_issues_page")
-        reason_val = reason.value if isinstance(reason, AssociationReason) else str(reason)
-        task_data = {
-            "uid": uid,
-            "url": url,
-            "params": dict(params) if params else {},
-            "reason": reason_val,
-            "owner_fallback": owner_fallback,
-            "repo_fallback": repo_fallback,
-        }
-        task_id = queue.enqueue(task_data, opts=admin_functions.TaskOptions(dispatch_deadline_seconds=300))
-        logger.info(f"Enqueued sync_github_issues_page task '{task_id}' for UID {uid}, url={url}")
-        return str(task_id)
-    except Exception as e:
-        logger.warning(f"Firebase task_queue.enqueue exception ({e}). Handling fallback dispatch.")
-
-        def _worker():
-            try:
-                execute_issue_page_sync(
-                    uid=uid,
-                    url=url,
-                    params=params,
-                    reason=reason,
-                    owner_fallback=owner_fallback,
-                    repo_fallback=repo_fallback,
-                    db=db,
-                )
-            except Exception as inner_e:
-                logger.error(f"Background thread execution error in execute_issue_page_sync: {inner_e}")
-
-        t = threading.Thread(target=_worker, daemon=True)
-        t.start()
-        return "thread_dispatched"
+    reason_val = reason.value if isinstance(reason, AssociationReason) else str(reason)
+    task_data = {
+        "uid": uid,
+        "url": url,
+        "params": dict(params) if params else {},
+        "reason": reason_val,
+        "owner_fallback": owner_fallback,
+        "repo_fallback": repo_fallback,
+    }
+    return dispatch_task(
+        queue_name="sync_github_issues_page",
+        task_data=task_data,
+        worker_fn=lambda: execute_issue_page_sync(
+            uid=uid,
+            url=url,
+            params=params,
+            reason=reason,
+            owner_fallback=owner_fallback,
+            repo_fallback=repo_fallback,
+            db=db,
+        ),
+    )
 
 
 def fetch_github_user_login(access_token: str) -> str | None:

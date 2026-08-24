@@ -15,6 +15,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "functions"))
 
 from github_sync import (
     IssuePayload,
+    enqueue_issue_page_sync,
     fetch_github_user_login,
     fetch_issue_in_memory,
     fetch_single_issue_page,
@@ -253,6 +254,42 @@ class TestClosedIssuesSync(unittest.TestCase):
         self.assertEqual(res["status"], "success")
         self.assertEqual(res["closed_issues_count"], 1)
         mock_task_ref.delete.assert_called_once()
+
+
+class TestEnqueueIssuePageSync(unittest.TestCase):
+    @patch("queue_utils.is_emulator", return_value=False)
+    @patch("firebase_admin.functions.task_queue")
+    def test_enqueue_issue_page_sync_production(self, mock_task_queue, mock_is_emu):
+        mock_queue = MagicMock()
+        mock_queue.enqueue.return_value = "issue_task_123"
+        mock_task_queue.return_value = mock_queue
+
+        mock_db = MagicMock()
+        res = enqueue_issue_page_sync(
+            uid="user_prod_1",
+            url="https://api.github.com/issues",
+            db=mock_db,
+            params={"page": 0},
+        )
+        self.assertEqual(res, "issue_task_123")
+        mock_task_queue.assert_called_once_with("sync_github_issues_page")
+        mock_queue.enqueue.assert_called_once()
+
+    @patch("queue_utils.is_emulator", return_value=True)
+    @patch("queue_utils.threading.Thread")
+    def test_enqueue_issue_page_sync_emulator(self, mock_thread_cls, mock_is_emu):
+        mock_thread_instance = MagicMock()
+        mock_thread_cls.return_value = mock_thread_instance
+
+        mock_db = MagicMock()
+        res = enqueue_issue_page_sync(
+            uid="user_emu_1",
+            url="https://api.github.com/issues",
+            db=mock_db,
+            params={"page": 1},
+        )
+        self.assertEqual(res, "thread_dispatched")
+        mock_thread_instance.start.assert_called_once()
 
 
 if __name__ == "__main__":

@@ -5,19 +5,17 @@ and dispatches asynchronous ranking tasks using Firebase Task Queue Functions (f
 See: https://firebase.google.com/docs/functions/task-functions#python
 """
 
-import concurrent.futures
 import logging
 from datetime import datetime
 
 from firebase_admin import functions as admin_functions
 from google.cloud import firestore
 from pydantic import BaseModel, ConfigDict
+from queue_utils import dispatch_task
 
 from genai_ranker import run_ranker
 
 logger = logging.getLogger(__name__)
-
-_ranking_executor = concurrent.futures.ThreadPoolExecutor(max_workers=3, thread_name_prefix="ranking-worker")
 
 
 class Task(BaseModel):
@@ -46,8 +44,7 @@ class Task(BaseModel):
 
 
 # ============================================================================
-# Asynchronous Task Enqueuing via Firebase Admin SDK
-# (https://firebase.google.com/docs/functions/task-functions#python)
+# Asynchronous Task Enqueuing via Task Queue Abstraction
 # ============================================================================
 
 
@@ -59,43 +56,22 @@ def enqueue_task_ranking(
     opts: admin_functions.TaskOptions | None = None,
 ) -> dict[str, object]:
     """
-    Enqueues a task to the Firebase Task Queue function using the official Firebase Admin SDK.
+    Enqueues a task to the Firebase Task Queue function using the task queue abstraction.
     Dispatches a payload with the user UID and task document ID.
-    See: https://firebase.google.com/docs/functions/task-functions#python
     """
-    try:
-        queue = admin_functions.task_queue(function_name)
-        task_opts = opts or admin_functions.TaskOptions(dispatch_deadline_seconds=300)
-        enqueued_id = queue.enqueue({"uid": uid, "task_id": task_id}, opts=task_opts)
-        logger.info(
-            f"Enqueued Firebase task '{enqueued_id}' in queue '{function_name}' for task '{task_id}' (UID {uid})"
-        )
-        return {
-            "status": "enqueued",
-            "task_id": enqueued_id,
-            "target_task_id": task_id,
-            "queue": function_name,
-            "uid": uid,
-        }
-    except Exception as e:
-        logger.warning(f"Firebase task_queue.enqueue exception ({e}). Handling fallback dispatch.")
-        # In local emulator or unauthenticated testing environments without Cloud Tasks credentials,
-        # dispatch asynchronously via bounded thread pool
-
-        def async_worker():
-            try:
-                update_task_priority(uid=uid, task_id=task_id, db=db)
-            except Exception as ex:
-                logger.error(f"Error in async ranking worker for task {task_id} (UID {uid}): {ex}")
-
-        _ranking_executor.submit(async_worker)
-
-        return {
-            "status": "enqueued",
-            "mode": "async_dispatched_fallback",
-            "target_task_id": task_id,
-            "uid": uid,
-        }
+    enqueued_id = dispatch_task(
+        queue_name=function_name,
+        task_data={"uid": uid, "task_id": task_id},
+        worker_fn=lambda: update_task_priority(uid=uid, task_id=task_id, db=db),
+        opts=opts,
+    )
+    return {
+        "status": "enqueued",
+        "task_id": enqueued_id,
+        "target_task_id": task_id,
+        "queue": function_name,
+        "uid": uid,
+    }
 
 
 # ============================================================================

@@ -13,6 +13,7 @@ from unittest.mock import MagicMock, patch
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "functions"))
 
 from firebase_functions import tasks_fn
+from queue_utils import _safe_run_worker, dispatch_task, is_emulator
 
 import main
 from genai_ranker import (
@@ -42,6 +43,70 @@ def get_callable_handler(func):
             if callable(cell.cell_contents) and not getattr(cell.cell_contents, "__closure__", None):
                 return cell.cell_contents
     return target
+
+
+class TestQueueUtils(unittest.TestCase):
+    @patch.dict(os.environ, {"FUNCTIONS_EMULATOR": "true"}, clear=True)
+    def test_is_emulator_functions_emulator(self):
+        self.assertTrue(is_emulator())
+
+    @patch.dict(os.environ, {"FIREBASE_EMULATOR_HUB": "127.0.0.1:4400"}, clear=True)
+    def test_is_emulator_hub(self):
+        self.assertTrue(is_emulator())
+
+    @patch.dict(os.environ, {"FIRESTORE_EMULATOR_HOST": "127.0.0.1:8080"}, clear=True)
+    def test_is_emulator_firestore_host(self):
+        self.assertTrue(is_emulator())
+
+    @patch.dict(os.environ, {}, clear=True)
+    def test_is_emulator_false_in_production(self):
+        self.assertFalse(is_emulator())
+
+    @patch("queue_utils.is_emulator", return_value=True)
+    @patch("queue_utils.threading.Thread")
+    def test_dispatch_task_under_emulator(self, mock_thread_cls, mock_is_emu):
+        mock_worker = MagicMock()
+        mock_thread_instance = MagicMock()
+        mock_thread_cls.return_value = mock_thread_instance
+
+        res = dispatch_task(queue_name="test_queue", task_data={"foo": "bar"}, worker_fn=mock_worker)
+        self.assertEqual(res, "thread_dispatched")
+        mock_thread_cls.assert_called_once()
+        self.assertTrue(mock_thread_cls.call_args[1].get("daemon"))
+        mock_thread_instance.start.assert_called_once()
+
+    @patch("queue_utils.is_emulator", return_value=False)
+    @patch("firebase_admin.functions.task_queue")
+    def test_dispatch_task_production_success(self, mock_task_queue, mock_is_emu):
+        mock_queue = MagicMock()
+        mock_queue.enqueue.return_value = "prod_task_123"
+        mock_task_queue.return_value = mock_queue
+
+        mock_worker = MagicMock()
+        res = dispatch_task(queue_name="prod_queue", task_data={"uid": "u1"}, worker_fn=mock_worker)
+        self.assertEqual(res, "prod_task_123")
+        mock_task_queue.assert_called_once_with("prod_queue")
+        mock_queue.enqueue.assert_called_once()
+
+    @patch("queue_utils.is_emulator", return_value=False)
+    @patch("queue_utils.threading.Thread")
+    @patch("firebase_admin.functions.task_queue")
+    def test_dispatch_task_production_fallback(self, mock_task_queue, mock_thread_cls, mock_is_emu):
+        mock_task_queue.side_effect = Exception("Cloud Tasks unavailable")
+        mock_worker = MagicMock()
+        mock_thread_instance = MagicMock()
+        mock_thread_cls.return_value = mock_thread_instance
+
+        res = dispatch_task(queue_name="fallback_queue", task_data={"uid": "u1"}, worker_fn=mock_worker)
+        self.assertEqual(res, "thread_dispatched")
+        mock_thread_instance.start.assert_called_once()
+
+    def test_safe_run_worker_handles_exception(self):
+        def bad_worker():
+            raise ValueError("Worker crash")
+
+        # Must not raise
+        _safe_run_worker(bad_worker, "test_queue")
 
 
 class TestTaskModel(unittest.TestCase):
@@ -340,8 +405,9 @@ class TestTaskFirestoreOperations(unittest.TestCase):
         self.assertEqual(result["marked_count"], 1)
         mock_batch.commit.assert_called_once()
 
+    @patch("queue_utils.is_emulator", return_value=False)
     @patch("firebase_admin.functions.task_queue")
-    def test_enqueue_task_ranking_with_firebase_admin(self, mock_task_queue):
+    def test_enqueue_task_ranking_with_firebase_admin(self, mock_task_queue, mock_is_emu):
         mock_queue = MagicMock()
         mock_queue.enqueue.return_value = "task_id_xyz_123"
         mock_task_queue.return_value = mock_queue
@@ -361,14 +427,19 @@ class TestTaskFirestoreOperations(unittest.TestCase):
         args, _kwargs = mock_queue.enqueue.call_args
         self.assertEqual(args[0], {"uid": "user_task_queue_1", "task_id": "task_abc_1"})
 
-    @patch("task._ranking_executor.submit")
-    def test_enqueue_task_ranking_fallback_dispatch(self, mock_submit):
+    @patch("queue_utils.is_emulator", return_value=True)
+    @patch("queue_utils.threading.Thread")
+    def test_enqueue_task_ranking_fallback_dispatch(self, mock_thread_cls, mock_is_emu):
         mock_db = MagicMock()
+        mock_thread_instance = MagicMock()
+        mock_thread_cls.return_value = mock_thread_instance
+
         res = enqueue_task_ranking(uid="user_async_1", task_id="task_fallback_1", db=mock_db)
         self.assertEqual(res["status"], "enqueued")
+        self.assertEqual(res["task_id"], "thread_dispatched")
         self.assertEqual(res["uid"], "user_async_1")
         self.assertEqual(res["target_task_id"], "task_fallback_1")
-        mock_submit.assert_called_once()
+        mock_thread_instance.start.assert_called_once()
 
     def test_get_user_tasks_sorted_by_priority(self):
         mock_db = MagicMock()
