@@ -7,7 +7,6 @@ Firestore persistence, and ensuring Tasks are ONLY created once an Issue and all
 import os
 import sys
 import unittest
-from datetime import datetime, timezone
 from unittest.mock import ANY, MagicMock, patch
 
 # Add functions to path
@@ -41,38 +40,26 @@ class TestGitHubDataStructures(unittest.TestCase):
 
 
 class TestSinglePageFetchingAndPagination(unittest.TestCase):
-    @patch("github_sync.fetch_single_issue_page_pygithub")
-    @patch("github_sync.get_github_client")
-    def test_fetch_single_issue_page_with_next_link(self, mock_get_client, mock_fetch_pygh):
+    def test_fetch_single_issue_page_with_next_page(self):
         mock_client = MagicMock()
-        mock_get_client.return_value = mock_client
+        mock_user = MagicMock()
+        mock_paginated = MagicMock()
+        mock_client.get_user.return_value = mock_user
+        mock_user.get_issues.return_value = mock_paginated
 
         mock_issue = MagicMock()
         mock_issue.number = 1
         mock_issue.title = "Issue 1"
-        mock_issue.body = "Body 1"
-        mock_issue.state = "open"
-        mock_issue.html_url = "https://github.com/org/repo/issues/1"
-        mock_issue.comments = 2
-        mock_issue.comments_url = "https://api.github.com/repos/org/repo/issues/1/comments"
-        mock_issue.created_at = datetime(2026, 8, 22, 10, 0, tzinfo=timezone.utc)
-        mock_issue.updated_at = datetime(2026, 8, 22, 10, 0, tzinfo=timezone.utc)
-        mock_issue.user.login = "author1"
-        mock_issue.assignees = []
-        mock_issue.pull_request = None
-        mock_issue.repository.owner.login = "org"
-        mock_issue.repository.name = "repo"
+        mock_paginated.get_page.return_value = [mock_issue] * 100
 
-        mock_fetch_pygh.return_value = ([mock_issue], True)
-
-        items, next_url = fetch_single_issue_page(
-            "https://api.github.com/issues",
-            headers={"Authorization": "Bearer test"},
-            params={"page": 0, "per_page": 100},
+        items, has_next = fetch_single_issue_page(
+            client=mock_client,
+            filter_name="assigned",
+            page=0,
+            per_page=100,
         )
-        self.assertEqual(len(items), 1)
-        self.assertEqual(items[0]["number"], 1)
-        self.assertEqual(next_url, "https://api.github.com/issues?page=1")
+        self.assertEqual(len(items), 100)
+        self.assertTrue(has_next)
 
 
 class TestFetchIssueInMemory(unittest.TestCase):
@@ -124,29 +111,22 @@ class TestPageProcessingAndDirectTaskCreation(unittest.TestCase):
     def test_process_and_save_issue_page_creates_tasks_directly(self):
         mock_db = MagicMock()
 
-        raw_items = [
-            {
-                "number": 10,
-                "title": "Bug fix issue",
-                "html_url": "https://github.com/org/repo/issues/10",
-                "repository": {"owner": {"login": "org"}, "name": "repo"},
-                "user": {"login": "author"},
-                "comments": 5,
-                "reactions": {"+1": 3},
-            },
-            {
-                "number": 11,
-                "title": "Feature request",
-                "html_url": "https://github.com/org/repo/issues/11",
-                "repository": {"owner": {"login": "org"}, "name": "repo"},
-                "user": {"login": "author2"},
-                "comments": 0,
-                "reactions": {"+1": 0},
-            },
-        ]
+        mock_issue1 = MagicMock()
+        mock_issue1.number = 10
+        mock_issue1.title = "Bug fix issue"
+        mock_issue1.html_url = "https://github.com/org/repo/issues/10"
+        mock_issue1.repository.owner.login = "org"
+        mock_issue1.repository.name = "repo"
+
+        mock_issue2 = MagicMock()
+        mock_issue2.number = 11
+        mock_issue2.title = "Feature request"
+        mock_issue2.html_url = "https://github.com/org/repo/issues/11"
+        mock_issue2.repository.owner.login = "org"
+        mock_issue2.repository.name = "repo"
 
         with patch("github_sync.ensure_task_for_issue") as mock_ensure_task:
-            process_and_save_issue_page(uid="user_123", raw_items=raw_items, reason="assigned", db=mock_db)
+            process_and_save_issue_page(uid="user_123", issues=[mock_issue1, mock_issue2], db=mock_db)
             self.assertEqual(mock_ensure_task.call_count, 2)
             # Verify ensure_task_for_issue was called with correct payload
             call1_args = mock_ensure_task.call_args_list[0][1]
@@ -233,16 +213,12 @@ class TestClosedIssuesSync(unittest.TestCase):
         mock_tasks_col.document.return_value = mock_task_ref
 
         # Return 1 closed issue from GitHub
-        mock_fetch.return_value = (
-            [
-                {
-                    "number": 99,
-                    "state": "closed",
-                    "repository": {"owner": {"login": "brianquinlan"}, "name": "marathon2"},
-                }
-            ],
-            None,
-        )
+        mock_issue = MagicMock()
+        mock_issue.number = 99
+        mock_issue.repository.owner.login = "brianquinlan"
+        mock_issue.repository.name = "marathon2"
+
+        mock_fetch.return_value = ([mock_issue], False)
 
         user = User(
             uid="user_closed_1", github_access_token="gho_test_closed", monitored_repos=["brianquinlan/marathon2"]
@@ -263,9 +239,9 @@ class TestEnqueueIssuePageSync(unittest.TestCase):
         mock_db = MagicMock()
         enqueue_issue_page_sync(
             uid="user_prod_1",
-            url="https://api.github.com/issues",
             db=mock_db,
-            params={"page": 0},
+            filter_name="assigned",
+            page=0,
         )
         mock_task_queue.assert_called_once_with("sync_github_issues_page")
         mock_queue.enqueue.assert_called_once()
@@ -279,9 +255,9 @@ class TestEnqueueIssuePageSync(unittest.TestCase):
         mock_db = MagicMock()
         enqueue_issue_page_sync(
             uid="user_emu_1",
-            url="https://api.github.com/issues",
             db=mock_db,
-            params={"page": 1},
+            filter_name="assigned",
+            page=1,
         )
         mock_thread_instance.start.assert_called_once()
 

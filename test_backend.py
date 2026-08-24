@@ -213,20 +213,11 @@ class TestTaskQueueSyncHandlers(unittest.TestCase):
         mock_doc_ref.get.return_value = mock_doc_snap
         mock_db.collection.return_value.document.return_value = mock_doc_ref
 
-        mock_fetch_page.return_value = (
-            [
-                {
-                    "number": 100,
-                    "comments": 2,
-                    "comments_url": "https://api.github.com/comments/100",
-                    "repository": {"owner": {"login": "o"}, "name": "r"},
-                }
-            ],
-            "https://api.github.com/issues?page=2",
-        )
+        mock_mock_issue = MagicMock()
+        mock_fetch_page.return_value = ([mock_mock_issue], True)
 
         mock_req = MagicMock(spec=tasks_fn.CallableRequest)
-        mock_req.data = {"uid": "user_q_1", "url": "https://api.github.com/issues", "reason": "assigned"}
+        mock_req.data = {"uid": "user_q_1", "filter_name": "assigned", "page": 0}
 
         result = handler(mock_req)
         self.assertIsNone(result)

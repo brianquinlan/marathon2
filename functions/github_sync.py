@@ -5,15 +5,14 @@ Uses asynchronous chained Firebase Task Queue Functions (with seamless local fal
 2. Mentioned issues (filter=mentioned)
 3. Created issues (filter=created)
 4. Monitored repository issues (user.monitored_repos)
-5. Chained paginated comments for each issue
 
 NOTE: Tasks are ONLY created/updated once an Issue and all of its comments are fully imported into Firestore.
 """
 
+from __future__ import annotations
+
 import re
-from collections.abc import Mapping
 from datetime import datetime, timezone
-from enum import Enum
 
 from github import Auth, Github, GithubException, GithubObject
 from github.Issue import Issue as PyghIssue
@@ -24,28 +23,6 @@ from queue_utils import dispatch_task
 from genai_ranker import IssuePayload
 from task import ensure_task_for_issue
 from user import User
-
-GITHUB_API_BASE_URL = "https://api.github.com"
-
-
-class AssociationReason(str, Enum):
-    """
-    Enumeration of reasons why a GitHub issue is associated with a user.
-    """
-
-    ASSIGNED = "assigned"
-    MENTIONED = "mentioned"
-    CREATED = "created"
-    MONITORED_REPO = "monitored_repo"
-
-
-def _safe_int(val: object, default: int = 0) -> int:
-    """Safely converts an object to int or returns default."""
-    if isinstance(val, int):
-        return val
-    if isinstance(val, str) and (val.isdigit() or (val.startswith("-") and val[1:].isdigit())):
-        return int(val)
-    return default
 
 
 def _parse_github_datetime(dt_val: object) -> datetime | None:
@@ -61,29 +38,6 @@ def _parse_github_datetime(dt_val: object) -> datetime | None:
         except Exception:
             return None
     return None
-
-
-def _extract_owner_and_repo(issue_data: dict[str, object]) -> tuple[str, str]:
-    """Extracts (owner, repo) from issue payload."""
-    repo_obj = issue_data.get("repository")
-    if isinstance(repo_obj, dict):
-        owner_obj = repo_obj.get("owner")
-        owner_login = owner_obj.get("login") if isinstance(owner_obj, dict) else None
-        repo_name = repo_obj.get("name")
-        if owner_login and repo_name:
-            return str(owner_login), str(repo_name)
-
-    repo_url = str(issue_data.get("repository_url") or "")
-    match = re.search(r"repos/([^/]+)/([^/]+)", repo_url)
-    if match:
-        return match.group(1), match.group(2)
-
-    html_url = str(issue_data.get("html_url") or issue_data.get("url") or "")
-    match = re.search(r"(?:github\.com|repos)/([^/]+)/([^/]+)", html_url)
-    if match:
-        return match.group(1), match.group(2)
-
-    return "unknown", "unknown"
 
 
 # ============================================================================
@@ -104,7 +58,7 @@ def get_github_client(access_token: str) -> Github:
 # ============================================================================
 
 
-def fetch_single_issue_page_pygithub(
+def fetch_single_issue_page(
     client: Github,
     filter_name: str | None = None,
     repo_full_name: str | None = None,
@@ -145,82 +99,6 @@ def fetch_single_issue_page_pygithub(
 
 
 # ============================================================================
-# Backwards-Compatible Page Fetching Helpers (used in existing sync flows)
-# ============================================================================
-
-
-def fetch_single_issue_page(
-    url: str, headers: dict[str, str], params: Mapping[str, object] | None = None, client: Github | None = None
-) -> tuple[list[dict[str, object]], str | None]:
-    """
-    Fetches a single page of issues and returns (raw_items_dict, next_page_url).
-    Delegates to PyGithub client when available.
-    """
-    try:
-        token = headers.get("Authorization", "").replace("Bearer ", "").replace("token ", "").strip()
-        g = client or (get_github_client(token) if token else None)
-        if not g:
-            return [], None
-
-        repo_match = re.search(r"repos/([^/]+)/([^/]+)/issues", url)
-        page = _safe_int(params.get("page"), default=0) if params else 0
-        per_page = _safe_int(params.get("per_page"), default=100) if params else 100
-        state = str(params.get("state", "open")) if params else "open"
-        since_raw = params.get("since") if params else None
-        since_dt = _parse_github_datetime(since_raw)
-
-        if repo_match:
-            owner, repo_name = repo_match.group(1), repo_match.group(2)
-            issues, has_next = fetch_single_issue_page_pygithub(
-                client=g,
-                repo_full_name=f"{owner}/{repo_name}",
-                state=state,
-                since=since_dt,
-                page=page,
-                per_page=per_page,
-            )
-        else:
-            filter_name = str(params.get("filter", "assigned")) if params else "assigned"
-            issues, has_next = fetch_single_issue_page_pygithub(
-                client=g, filter_name=filter_name, state=state, since=since_dt, page=page, per_page=per_page
-            )
-
-        items_dict: list[dict[str, object]] = []
-        for it in issues:
-            raw_repo = {
-                "name": it.repository.name if it.repository else (repo_match.group(2) if repo_match else "unknown"),
-                "owner": {
-                    "login": it.repository.owner.login
-                    if it.repository and it.repository.owner
-                    else (repo_match.group(1) if repo_match else "unknown")
-                },
-            }
-            raw_d: dict[str, object] = {
-                "number": it.number,
-                "title": it.title,
-                "body": it.body,
-                "state": it.state,
-                "html_url": it.html_url,
-                "comments": it.comments,
-                "comments_url": it.comments_url,
-                "created_at": it.created_at.isoformat() if it.created_at else None,
-                "updated_at": it.updated_at.isoformat() if it.updated_at else None,
-                "user": {"login": it.user.login} if it.user else None,
-                "assignees": [{"login": a.login} for a in (it.assignees or []) if a and a.login],
-                "pull_request": bool(it.pull_request),
-                "repository": raw_repo,
-            }
-            items_dict.append(raw_d)
-
-        next_url = f"{url}?page={page + 1}" if has_next else None
-        return items_dict, next_url
-    except PermissionError:
-        raise
-    except Exception:
-        return [], None
-
-
-# ============================================================================
 # In-Memory Fetcher & Page Processing
 # ============================================================================
 
@@ -248,8 +126,7 @@ def fetch_issue_in_memory(
 
 def process_and_save_issue_page(
     uid: str,
-    raw_items: list[dict[str, object]],
-    reason: AssociationReason | str,
+    issues: list[PyghIssue],
     db: firestore.Client,
     owner_fallback: str | None = None,
     repo_fallback: str | None = None,
@@ -259,25 +136,25 @@ def process_and_save_issue_page(
     the associated Task document in Firestore (users/{uid}/tasks/task_{doc_id}).
     Does not store intermediate issue documents in Firestore.
     """
-    for item in raw_items:
-        raw_num = item.get("number", 0)
-        issue_number = int(raw_num) if isinstance(raw_num, (int, str)) and str(raw_num).isdigit() else 0
+    for issue in issues:
+        issue_number = issue.number
         if issue_number <= 0:
             continue
 
-        owner, repo = _extract_owner_and_repo(item)
-        if owner == "unknown" and owner_fallback:
-            owner = owner_fallback
-        if repo == "unknown" and repo_fallback:
-            repo = repo_fallback
+        owner = (
+            issue.repository.owner.login
+            if issue.repository and issue.repository.owner
+            else (owner_fallback or "unknown")
+        )
+        repo = issue.repository.name if issue.repository else (repo_fallback or "unknown")
 
         clean_owner = re.sub(r"[^a-zA-Z0-9_-]", "_", str(owner))
         clean_repo = re.sub(r"[^a-zA-Z0-9_-]", "_", str(repo))
         doc_id = f"{clean_owner}_{clean_repo}_{issue_number}"
 
         issue_payload: dict[str, object] = {
-            "title": str(item["title"]) if item.get("title") is not None else None,
-            "url": str(item.get("html_url") or item.get("url") or ""),
+            "title": issue.title,
+            "url": issue.html_url or "",
             "owner": owner,
             "repo": repo,
             "issue_number": issue_number,
@@ -289,15 +166,19 @@ def process_and_save_issue_page(
 
 def execute_issue_page_sync(
     uid: str,
-    url: str,
-    params: Mapping[str, object] | None,
-    reason: AssociationReason | str,
-    owner_fallback: str | None,
-    repo_fallback: str | None,
     db: firestore.Client,
+    filter_name: str | None = None,
+    repo_full_name: str | None = None,
+    state: str = "open",
+    since: str | None = None,
+    page: int = 0,
+    per_page: int = 100,
+    owner_fallback: str | None = None,
+    repo_fallback: str | None = None,
+    client: Github | None = None,
 ) -> None:
     """
-    Executes fetching one page of issues from GitHub and chaining to the next page if available.
+    Executes fetching one page of issues from GitHub via PyGithub and chaining to the next page if available.
     """
     user_ref = db.collection("users").document(uid)
     doc_snap = user_ref.get()
@@ -309,41 +190,50 @@ def execute_issue_page_sync(
     if not user.github_access_token:
         return
 
-    headers = {
-        "Authorization": f"Bearer {user.github_access_token}",
-        "Accept": "application/vnd.github+json",
-        "X-GitHub-Api-Version": "2022-11-28",
-    }
-
-    client = get_github_client(user.github_access_token)
-    items, next_url = fetch_single_issue_page(url=url, headers=headers, params=params, client=client)
+    g = client or get_github_client(user.github_access_token)
+    since_dt = _parse_github_datetime(since)
+    items, has_next = fetch_single_issue_page(
+        client=g,
+        filter_name=filter_name,
+        repo_full_name=repo_full_name,
+        state=state,
+        since=since_dt,
+        page=page,
+        per_page=per_page,
+    )
     process_and_save_issue_page(
-        uid=uid, raw_items=items, reason=reason, db=db, owner_fallback=owner_fallback, repo_fallback=repo_fallback
+        uid=uid,
+        issues=items,
+        db=db,
+        owner_fallback=owner_fallback,
+        repo_fallback=repo_fallback,
     )
 
     # Chain next page of issues if present
-    if next_url:
-        page_val = _safe_int(params.get("page"), default=0) if params else 0
-        next_params: dict[str, object] = dict(params) if params else {}
-        next_params["page"] = page_val + 1
-
+    if has_next:
         enqueue_issue_page_sync(
             uid=uid,
-            url=url,
-            params=next_params,
-            reason=reason,
+            db=db,
+            filter_name=filter_name,
+            repo_full_name=repo_full_name,
+            state=state,
+            since=since,
+            page=page + 1,
+            per_page=per_page,
             owner_fallback=owner_fallback,
             repo_fallback=repo_fallback,
-            db=db,
         )
 
 
 def enqueue_issue_page_sync(
     uid: str,
-    url: str,
     db: firestore.Client,
-    params: Mapping[str, object] | None = None,
-    reason: AssociationReason | str = AssociationReason.ASSIGNED,
+    filter_name: str | None = None,
+    repo_full_name: str | None = None,
+    state: str = "open",
+    since: str | None = None,
+    page: int = 0,
+    per_page: int = 100,
     owner_fallback: str | None = None,
     repo_fallback: str | None = None,
 ) -> None:
@@ -351,12 +241,14 @@ def enqueue_issue_page_sync(
     Enqueues a task to process a page of issues from GitHub using the task queue abstraction.
     Falls back seamlessly to background thread execution if running in the emulator.
     """
-    reason_val = reason.value if isinstance(reason, AssociationReason) else str(reason)
-    task_data = {
+    task_data: dict[str, object] = {
         "uid": uid,
-        "url": url,
-        "params": dict(params) if params else {},
-        "reason": reason_val,
+        "filter_name": filter_name,
+        "repo_full_name": repo_full_name,
+        "state": state,
+        "since": since,
+        "page": page,
+        "per_page": per_page,
         "owner_fallback": owner_fallback,
         "repo_fallback": repo_fallback,
     }
@@ -365,12 +257,15 @@ def enqueue_issue_page_sync(
         task_data=task_data,
         worker_fn=lambda: execute_issue_page_sync(
             uid=uid,
-            url=url,
-            params=params,
-            reason=reason,
+            db=db,
+            filter_name=filter_name,
+            repo_full_name=repo_full_name,
+            state=state,
+            since=since,
+            page=page,
+            per_page=per_page,
             owner_fallback=owner_fallback,
             repo_fallback=repo_fallback,
-            db=db,
         ),
     )
 
@@ -427,25 +322,18 @@ def start_user_github_sync(user: User, db: firestore.Client, state: str = "open"
     enqueued_tasks: list[dict[str, object]] = []
 
     # 1. Enqueue user-level issue filters
-    filters = [
-        ("assigned", AssociationReason.ASSIGNED),
-        ("mentioned", AssociationReason.MENTIONED),
-        ("created", AssociationReason.CREATED),
-    ]
-
-    for filter_name, reason_enum in filters:
-        params: dict[str, object] = {
-            "filter": filter_name,
-            "state": state,
-            "per_page": 100,
-            "page": 0,
-        }
-        if since:
-            params["since"] = since
-
-        url = f"{GITHUB_API_BASE_URL}/issues"
-        enqueue_issue_page_sync(uid=user_uid, url=url, params=params, reason=reason_enum, db=db)
-        enqueued_tasks.append({"reason": reason_enum.value, "url": url})
+    filters = ["assigned", "mentioned", "created"]
+    for filter_name in filters:
+        enqueue_issue_page_sync(
+            uid=user_uid,
+            db=db,
+            filter_name=filter_name,
+            state=state,
+            since=since,
+            page=0,
+            per_page=100,
+        )
+        enqueued_tasks.append({"filter": filter_name})
 
     # 2. Enqueue monitored repository endpoints
     for repo_path in user.monitored_repos:
@@ -454,25 +342,18 @@ def start_user_github_sync(user: User, db: firestore.Client, state: str = "open"
             continue
 
         owner_part, repo_part = repo_clean.split("/", 1)
-        repo_params: dict[str, object] = {
-            "state": state,
-            "per_page": 100,
-            "page": 0,
-        }
-        if since:
-            repo_params["since"] = since
-
-        url = f"{GITHUB_API_BASE_URL}/repos/{owner_part}/{repo_part}/issues"
         enqueue_issue_page_sync(
             uid=user_uid,
-            url=url,
-            params=repo_params,
-            reason=AssociationReason.MONITORED_REPO,
+            db=db,
+            repo_full_name=repo_clean,
+            state=state,
+            since=since,
+            page=0,
+            per_page=100,
             owner_fallback=owner_part,
             repo_fallback=repo_part,
-            db=db,
         )
-        enqueued_tasks.append({"reason": f"monitored:{repo_clean}", "url": url})
+        enqueued_tasks.append({"repo": repo_clean})
 
     # Update sync timestamp on User profile
     now_iso = datetime.now(timezone.utc).isoformat()
@@ -508,31 +389,23 @@ def sync_closed_issues_for_user(user: User, db: firestore.Client, client: Github
     if not user.github_access_token:
         return
 
-    headers = {
-        "Authorization": f"Bearer {user.github_access_token}",
-        "Accept": "application/vnd.github+json",
-        "X-GitHub-Api-Version": "2022-11-28",
-    }
-
     g = client or get_github_client(user.github_access_token)
-    since = user.last_assigned_issue_update_time
-    closed_items: list[dict[str, object]] = []
+    since_dt = _parse_github_datetime(user.last_assigned_issue_update_time)
+    closed_items: list[tuple[PyghIssue, str | None, str | None]] = []
 
     # 1. Query user-level closed issue filters
     filters = ["assigned", "mentioned", "created"]
     for filter_name in filters:
-        params: dict[str, object] = {
-            "filter": filter_name,
-            "state": "closed",
-            "per_page": 100,
-            "page": 0,
-        }
-        if since:
-            params["since"] = since
-
-        url = f"{GITHUB_API_BASE_URL}/issues"
-        items, _ = fetch_single_issue_page(url=url, headers=headers, params=params, client=g)
-        closed_items.extend(items)
+        items, _ = fetch_single_issue_page(
+            client=g,
+            filter_name=filter_name,
+            state="closed",
+            since=since_dt,
+            page=0,
+            per_page=100,
+        )
+        for it in items:
+            closed_items.append((it, None, None))
 
     # 2. Query monitored repositories for closed issues
     for repo_path in user.monitored_repos:
@@ -541,38 +414,30 @@ def sync_closed_issues_for_user(user: User, db: firestore.Client, client: Github
             continue
 
         owner_part, repo_part = repo_clean.split("/", 1)
-        repo_params: dict[str, object] = {
-            "state": "closed",
-            "per_page": 100,
-            "page": 0,
-        }
-        if since:
-            repo_params["since"] = since
-
-        url = f"{GITHUB_API_BASE_URL}/repos/{owner_part}/{repo_part}/issues"
-        items, _ = fetch_single_issue_page(url=url, headers=headers, params=repo_params, client=g)
+        items, _ = fetch_single_issue_page(
+            client=g,
+            repo_full_name=repo_clean,
+            state="closed",
+            since=since_dt,
+            page=0,
+            per_page=100,
+        )
         for it in items:
-            if "_owner_fallback" not in it:
-                it["_owner_fallback"] = owner_part
-                it["_repo_fallback"] = repo_part
-            closed_items.append(it)
+            closed_items.append((it, owner_part, repo_part))
 
     # Process and remove closed issues from tasks
     tasks_col = db.collection("users").document(user_uid).collection("tasks")
-
     seen_doc_ids: set[str] = set()
 
-    for item in closed_items:
-        owner, repo = _extract_owner_and_repo(item)
-        if owner == "unknown" and "_owner_fallback" in item:
-            owner = str(item["_owner_fallback"])
-        if repo == "unknown" and "_repo_fallback" in item:
-            repo = str(item["_repo_fallback"])
+    for item, owner_fallback, repo_fallback in closed_items:
+        owner = (
+            item.repository.owner.login if item.repository and item.repository.owner else (owner_fallback or "unknown")
+        )
+        repo = item.repository.name if item.repository else (repo_fallback or "unknown")
 
-        raw_num = item.get("number", 0)
-        issue_number = int(raw_num) if isinstance(raw_num, (int, str)) and str(raw_num).isdigit() else 0
-        clean_owner = re.sub(r"[^a-zA-Z0-9_-]", "_", owner)
-        clean_repo = re.sub(r"[^a-zA-Z0-9_-]", "_", repo)
+        issue_number = item.number
+        clean_owner = re.sub(r"[^a-zA-Z0-9_-]", "_", str(owner))
+        clean_repo = re.sub(r"[^a-zA-Z0-9_-]", "_", str(repo))
         doc_id = f"{clean_owner}_{clean_repo}_{issue_number}"
 
         if doc_id in seen_doc_ids:

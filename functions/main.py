@@ -449,32 +449,40 @@ def sync_github_issues_page(req: tasks_fn.CallableRequest) -> None:
     data: dict[str, object] = req.data if isinstance(req.data, dict) else {}
     raw_uid = data.get("uid")
     uid = str(raw_uid) if raw_uid is not None else None
-    raw_url = data.get("url")
-    url = str(raw_url) if raw_url is not None else None
-    raw_params = data.get("params")
-    params: dict[str, object] | None = raw_params if isinstance(raw_params, dict) else None
-    raw_reason = data.get("reason", "assigned")
-    reason = str(raw_reason)
+    raw_filter = data.get("filter_name")
+    filter_name = str(raw_filter) if raw_filter is not None else None
+    raw_repo_full = data.get("repo_full_name")
+    repo_full_name = str(raw_repo_full) if raw_repo_full is not None else None
+    state = str(data.get("state", "open"))
+    raw_since = data.get("since")
+    since = str(raw_since) if raw_since is not None else None
+    raw_page = data.get("page", 0)
+    page = int(raw_page) if isinstance(raw_page, (int, str)) and str(raw_page).isdigit() else 0
+    raw_per_page = data.get("per_page", 100)
+    per_page = int(raw_per_page) if isinstance(raw_per_page, (int, str)) and str(raw_per_page).isdigit() else 100
     raw_owner = data.get("owner_fallback")
     owner_fallback = str(raw_owner) if raw_owner is not None else None
     raw_repo = data.get("repo_fallback")
     repo_fallback = str(raw_repo) if raw_repo is not None else None
 
-    if not uid or not url:
+    if not uid:
         raise tasks_fn.HttpsError(
-            code=tasks_fn.FunctionsErrorCode.INVALID_ARGUMENT, message="Missing 'uid' or 'url' in task data."
+            code=tasks_fn.FunctionsErrorCode.INVALID_ARGUMENT, message="Missing 'uid' in task data."
         )
 
     from github_sync import execute_issue_page_sync
 
     execute_issue_page_sync(
         uid=uid,
-        url=url,
-        params=params if params else None,
-        reason=reason,
+        db=db,
+        filter_name=filter_name,
+        repo_full_name=repo_full_name,
+        state=state,
+        since=since,
+        page=page,
+        per_page=per_page,
         owner_fallback=owner_fallback,
         repo_fallback=repo_fallback,
-        db=db,
     )
 
 
