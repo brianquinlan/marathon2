@@ -170,7 +170,7 @@ def execute_issue_page_sync(
     filter_name: str | None = None,
     repo_full_name: str | None = None,
     state: str = "open",
-    since: str | None = None,
+    since: datetime | str | None = None,
     page: int = 0,
     per_page: int = 100,
     owner_fallback: str | None = None,
@@ -191,7 +191,7 @@ def execute_issue_page_sync(
         return
 
     g = client or get_github_client(user.github_access_token)
-    since_dt = _parse_github_datetime(since)
+    since_dt = since if isinstance(since, datetime) else _parse_github_datetime(since)
     items, has_next = fetch_single_issue_page(
         client=g,
         filter_name=filter_name,
@@ -231,7 +231,7 @@ def enqueue_issue_page_sync(
     filter_name: str | None = None,
     repo_full_name: str | None = None,
     state: str = "open",
-    since: str | None = None,
+    since: datetime | str | None = None,
     page: int = 0,
     per_page: int = 100,
     owner_fallback: str | None = None,
@@ -241,12 +241,13 @@ def enqueue_issue_page_sync(
     Enqueues a task to process a page of issues from GitHub using the task queue abstraction.
     Falls back seamlessly to background thread execution if running in the emulator.
     """
+    since_str = since.isoformat() if isinstance(since, datetime) else (str(since) if since is not None else None)
     task_data: dict[str, object] = {
         "uid": uid,
         "filter_name": filter_name,
         "repo_full_name": repo_full_name,
         "state": state,
-        "since": since,
+        "since": since_str,
         "page": page,
         "per_page": per_page,
         "owner_fallback": owner_fallback,
@@ -318,25 +319,28 @@ def start_user_github_sync(user: User, db: firestore.Client, state: str = "open"
                 merge=True,
             )
 
-    since = user.last_assigned_issue_update_time
     enqueued_tasks: list[dict[str, object]] = []
 
-    # 1. Enqueue user-level issue filters
-    filters = ["assigned", "mentioned", "created"]
-    for filter_name in filters:
+    # 1. Enqueue user-level issue filters with individual timestamps
+    filter_timestamps: list[tuple[str, datetime | None]] = [
+        ("assigned", user.last_assigned_sync),
+        ("mentioned", user.last_mentioned_sync),
+        ("created", user.last_created_sync),
+    ]
+    for filter_name, filter_since in filter_timestamps:
         enqueue_issue_page_sync(
             uid=user_uid,
             db=db,
             filter_name=filter_name,
             state=state,
-            since=since,
+            since=filter_since,
             page=0,
             per_page=100,
         )
         enqueued_tasks.append({"filter": filter_name})
 
-    # 2. Enqueue monitored repository endpoints
-    for repo_path in user.monitored_repos:
+    # 2. Enqueue monitored repository endpoints with individual timestamps
+    for repo_path, repo_since in user.monitored_repos.items():
         repo_clean = repo_path.strip().strip("/")
         if not repo_clean or "/" not in repo_clean:
             continue
@@ -347,7 +351,7 @@ def start_user_github_sync(user: User, db: firestore.Client, state: str = "open"
             db=db,
             repo_full_name=repo_clean,
             state=state,
-            since=since,
+            since=repo_since,
             page=0,
             per_page=100,
             owner_fallback=owner_part,
@@ -355,12 +359,20 @@ def start_user_github_sync(user: User, db: firestore.Client, state: str = "open"
         )
         enqueued_tasks.append({"repo": repo_clean})
 
-    # Update sync timestamp on User profile
-    now_iso = datetime.now(timezone.utc).isoformat()
-    user.last_assigned_issue_update_time = now_iso
+    # Update sync timestamps on User profile
+    now = datetime.now(timezone.utc)
+    user.last_assigned_sync = now
+    user.last_mentioned_sync = now
+    user.last_created_sync = now
+    for repo_path in list(user.monitored_repos.keys()):
+        user.monitored_repos[repo_path] = now
+
     db.collection("users").document(user_uid).set(
         {
-            "last_assigned_issue_update_time": now_iso,
+            "last_assigned_sync": now,
+            "last_mentioned_sync": now,
+            "last_created_sync": now,
+            "monitored_repos": user.monitored_repos,
             "updated_at": firestore.SERVER_TIMESTAMP,
         },
         merge=True,
@@ -371,7 +383,7 @@ def start_user_github_sync(user: User, db: firestore.Client, state: str = "open"
         "uid": user_uid,
         "initial_queues_count": len(enqueued_tasks),
         "enqueued_tasks": enqueued_tasks,
-        "sync_time": now_iso,
+        "sync_time": now.isoformat(),
     }
 
 
@@ -390,25 +402,28 @@ def sync_closed_issues_for_user(user: User, db: firestore.Client, client: Github
         return
 
     g = client or get_github_client(user.github_access_token)
-    since_dt = _parse_github_datetime(user.last_assigned_issue_update_time)
     closed_items: list[tuple[PyghIssue, str | None, str | None]] = []
 
-    # 1. Query user-level closed issue filters
-    filters = ["assigned", "mentioned", "created"]
-    for filter_name in filters:
+    # 1. Query user-level closed issue filters with individual timestamps
+    filter_timestamps: list[tuple[str, datetime | None]] = [
+        ("assigned", user.last_assigned_sync),
+        ("mentioned", user.last_mentioned_sync),
+        ("created", user.last_created_sync),
+    ]
+    for filter_name, filter_since in filter_timestamps:
         items, _ = fetch_single_issue_page(
             client=g,
             filter_name=filter_name,
             state="closed",
-            since=since_dt,
+            since=filter_since,
             page=0,
             per_page=100,
         )
         for it in items:
             closed_items.append((it, None, None))
 
-    # 2. Query monitored repositories for closed issues
-    for repo_path in user.monitored_repos:
+    # 2. Query monitored repositories for closed issues with individual timestamps
+    for repo_path, repo_since in user.monitored_repos.items():
         repo_clean = repo_path.strip().strip("/")
         if not repo_clean or "/" not in repo_clean:
             continue
@@ -418,7 +433,7 @@ def sync_closed_issues_for_user(user: User, db: firestore.Client, client: Github
             client=g,
             repo_full_name=repo_clean,
             state="closed",
-            since=since_dt,
+            since=repo_since,
             page=0,
             per_page=100,
         )
@@ -451,12 +466,20 @@ def sync_closed_issues_for_user(user: User, db: firestore.Client, client: Github
         if task_snap.exists:
             task_ref.delete()
 
-    # Update sync timestamp
-    now_iso = datetime.now(timezone.utc).isoformat()
-    user.last_assigned_issue_update_time = now_iso
+    # Update sync timestamps
+    now = datetime.now(timezone.utc)
+    user.last_assigned_sync = now
+    user.last_mentioned_sync = now
+    user.last_created_sync = now
+    for repo_path in list(user.monitored_repos.keys()):
+        user.monitored_repos[repo_path] = now
+
     db.collection("users").document(user_uid).set(
         {
-            "last_assigned_issue_update_time": now_iso,
+            "last_assigned_sync": now,
+            "last_mentioned_sync": now,
+            "last_created_sync": now,
+            "monitored_repos": user.monitored_repos,
             "updated_at": firestore.SERVER_TIMESTAMP,
         },
         merge=True,

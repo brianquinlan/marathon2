@@ -143,12 +143,18 @@ def render_settings_page(req: https_fn.Request) -> Response:
         new_token = (req.form.get("github_access_token") or "").strip()
         new_gemini_key = (req.form.get("gemini_api_key") or "").strip()
         raw_repos = (req.form.get("monitored_repos") or "").strip()
-        repo_list = [r.strip() for r in raw_repos.split(",") if r.strip()]
+        repo_names = [r.strip() for r in raw_repos.split(",") if r.strip()]
+
+        doc_snap = user_ref.get()
+        current_data = doc_snap.to_dict() or {}
+        existing_repos_raw = current_data.get("monitored_repos")
+        existing_repos: dict[str, object] = dict(existing_repos_raw) if isinstance(existing_repos_raw, dict) else {}
+        updated_repos: dict[str, object] = {repo: existing_repos.get(repo) for repo in repo_names}
 
         update_data: dict[str, object] = {
             "github_access_token": new_token if new_token else None,
             "gemini_api_key": new_gemini_key if new_gemini_key else None,
-            "monitored_repos": repo_list,
+            "monitored_repos": updated_repos,
             "updated_at": SERVER_TIMESTAMP,
         }
 
@@ -184,7 +190,6 @@ def associate_user_info(req: https_fn.CallableRequest) -> dict[str, object]:
     Accepts:
       - github_access_token (optional)
       - gemini_api_key (optional)
-      - last_assigned_issue_update_time (optional)
       - monitored_repos (optional)
       - custom_data / associated_data (optional)
     """
@@ -206,10 +211,8 @@ def associate_user_info(req: https_fn.CallableRequest) -> dict[str, object]:
     github_access_token = str(raw_token) if raw_token is not None else None
     raw_key = payload.get("gemini_api_key")
     gemini_api_key = str(raw_key) if raw_key is not None else None
-    raw_time = payload.get("last_assigned_issue_update_time")
-    last_assigned_issue_update_time = str(raw_time) if raw_time is not None else None
     raw_repos = payload.get("monitored_repos")
-    monitored_repos = [str(x) for x in raw_repos] if isinstance(raw_repos, list) else None
+    monitored_repos: dict[str, object] | None = dict(raw_repos) if isinstance(raw_repos, dict) else None
     raw_custom = payload.get("custom_data") or payload.get("associated_data")
     custom_data = raw_custom if isinstance(raw_custom, dict) else {}
 
@@ -226,10 +229,10 @@ def associate_user_info(req: https_fn.CallableRequest) -> dict[str, object]:
             user.github_access_token = github_access_token
         if gemini_api_key is not None:
             user.gemini_api_key = gemini_api_key
-        if last_assigned_issue_update_time is not None:
-            user.last_assigned_issue_update_time = last_assigned_issue_update_time
         if monitored_repos is not None:
-            user.monitored_repos = monitored_repos
+            from github_sync import _parse_github_datetime
+
+            user.monitored_repos = {str(k): _parse_github_datetime(v) for k, v in monitored_repos.items()}
         if custom_data:
             user.custom_data.update(custom_data)
 
@@ -247,9 +250,9 @@ def associate_user_info(req: https_fn.CallableRequest) -> dict[str, object]:
         if raw_pic is not None:
             user.photo_url = str(raw_pic)
 
-        raw_prov = provider_info.get("primary_provider")
-        if raw_prov is not None:
-            user.primary_provider = str(raw_prov)
+        raw_p = provider_info.get("primary_provider")
+        if raw_p is not None:
+            user.primary_provider = str(raw_p)
         raw_gid = provider_info.get("google_id")
         if raw_gid is not None:
             user.google_id = str(raw_gid)
@@ -266,7 +269,6 @@ def associate_user_info(req: https_fn.CallableRequest) -> dict[str, object]:
             token_dict=token,
             provider_info=provider_info,
             github_access_token=github_access_token,
-            last_assigned_issue_update_time=last_assigned_issue_update_time,
             monitored_repos=monitored_repos,
             custom_data=custom_data,
         )
@@ -629,16 +631,12 @@ def user_api(req: https_fn.Request) -> Response:
             user.github_access_token = (
                 str(body["github_access_token"]) if body["github_access_token"] is not None else None
             )
-        if "last_assigned_issue_update_time" in body:
-            user.last_assigned_issue_update_time = (
-                str(body["last_assigned_issue_update_time"])
-                if body["last_assigned_issue_update_time"] is not None
-                else None
-            )
         if "monitored_repos" in body:
             raw_mr = body.get("monitored_repos")
-            if isinstance(raw_mr, list):
-                user.monitored_repos = [str(x) for x in raw_mr]
+            if isinstance(raw_mr, dict):
+                from github_sync import _parse_github_datetime
+
+                user.monitored_repos = {str(k): _parse_github_datetime(v) for k, v in raw_mr.items()}
         if "custom_data" in body:
             raw_cd = body.get("custom_data")
             if isinstance(raw_cd, dict):
@@ -722,8 +720,8 @@ def on_user_settings_changed(
     after_token = after_data.get("github_access_token")
     before_token = before_data.get("github_access_token")
 
-    after_repos = sorted(after_data.get("monitored_repos") or [])
-    before_repos = sorted(before_data.get("monitored_repos") or [])
+    after_repos = sorted((after_data.get("monitored_repos") or {}).keys())
+    before_repos = sorted((before_data.get("monitored_repos") or {}).keys())
 
     if not after_token:
         return

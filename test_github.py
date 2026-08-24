@@ -145,7 +145,7 @@ class TestInitialSyncDispatcher(unittest.TestCase):
         user = User(
             uid="user_123",
             github_access_token="gho_token_123",
-            monitored_repos=["google/jax", "brianquinlan/marathon2"],
+            monitored_repos={"google/jax": None, "brianquinlan/marathon2": None},
         )
 
         result = start_user_github_sync(user=user, db=mock_db)
@@ -186,7 +186,7 @@ class TestGitHubUserLoginDiscovery(unittest.TestCase):
         mock_fetch_login.return_value = "brianquinlan"
 
         user = User(
-            uid="user_discover_1", github_access_token="gho_tok_discover", github_username=None, monitored_repos=[]
+            uid="user_discover_1", github_access_token="gho_tok_discover", github_username=None, monitored_repos={}
         )
 
         res = start_user_github_sync(user=user, db=mock_db)
@@ -221,7 +221,7 @@ class TestClosedIssuesSync(unittest.TestCase):
         mock_fetch.return_value = ([mock_issue], False)
 
         user = User(
-            uid="user_closed_1", github_access_token="gho_test_closed", monitored_repos=["brianquinlan/marathon2"]
+            uid="user_closed_1", github_access_token="gho_test_closed", monitored_repos={"brianquinlan/marathon2": None}
         )
 
         sync_closed_issues_for_user(user=user, db=mock_db)

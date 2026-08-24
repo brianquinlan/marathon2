@@ -1,3 +1,4 @@
+from collections.abc import Mapping
 from datetime import datetime
 
 from pydantic import BaseModel, ConfigDict, Field
@@ -10,8 +11,10 @@ class User(BaseModel):
     github_access_token: str | None = None
     github_username: str | None = None
     gemini_api_key: str | None = None
-    last_assigned_issue_update_time: str | None = None
-    monitored_repos: list[str] = Field(default_factory=list)
+    last_assigned_sync: datetime | None = None
+    last_mentioned_sync: datetime | None = None
+    last_created_sync: datetime | None = None
+    monitored_repos: dict[str, datetime | None] = Field(default_factory=dict)
 
     # Firebase Authentication & Profile fields
     uid: str | None = None
@@ -37,8 +40,10 @@ class User(BaseModel):
         token_dict: dict[str, object],
         provider_info: dict[str, object],
         github_access_token: str | None = None,
-        last_assigned_issue_update_time: str | None = None,
-        monitored_repos: list[str] | None = None,
+        last_assigned_sync: datetime | None = None,
+        last_mentioned_sync: datetime | None = None,
+        last_created_sync: datetime | None = None,
+        monitored_repos: Mapping[str, object] | None = None,
         custom_data: dict[str, object] | None = None,
     ) -> "User":
         """
@@ -58,6 +63,15 @@ class User(BaseModel):
         raw_google_id = provider_info.get("google_id")
         raw_github_id = provider_info.get("github_id")
 
+        repos_dict: dict[str, datetime | None] = {}
+        if monitored_repos:
+            from github_sync import _parse_github_datetime
+
+            repos_dict = {
+                str(k): (v if isinstance(v, datetime) else _parse_github_datetime(v))
+                for k, v in monitored_repos.items()
+            }
+
         return cls(
             uid=str(raw_uid) if raw_uid is not None else None,
             email=str(raw_email) if raw_email is not None else None,
@@ -69,7 +83,9 @@ class User(BaseModel):
             github_id=str(raw_github_id) if raw_github_id is not None else None,
             linked_providers=linked_list,
             github_access_token=github_access_token,
-            last_assigned_issue_update_time=last_assigned_issue_update_time,
-            monitored_repos=monitored_repos or [],
+            last_assigned_sync=last_assigned_sync,
+            last_mentioned_sync=last_mentioned_sync,
+            last_created_sync=last_created_sync,
+            monitored_repos=repos_dict,
             custom_data=custom_data or {},
         )

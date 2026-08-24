@@ -1,6 +1,7 @@
 import os
 import sys
 import unittest
+from datetime import datetime, timezone
 from unittest.mock import MagicMock, patch
 
 from flask import Response
@@ -31,11 +32,12 @@ def get_callable_handler(func):
 
 class TestUserModel(unittest.TestCase):
     def test_user_dataclass_defaults_and_fields(self):
+        dt_sync = datetime(2026, 8, 22, 8, 0, tzinfo=timezone.utc)
         user = User(
             github_access_token="gho_test_token_123",
             github_username="brianquinlan",
-            last_assigned_issue_update_time="2026-08-22T08:00:00Z",
-            monitored_repos=["brianquinlan/marathon2", "google/jax"],
+            last_assigned_sync=dt_sync,
+            monitored_repos={"brianquinlan/marathon2": None, "google/jax": None},
             uid="user_abc_123",
             email="developer@example.com",
             email_verified=True,
@@ -46,8 +48,8 @@ class TestUserModel(unittest.TestCase):
         )
         self.assertEqual(user.github_access_token, "gho_test_token_123")
         self.assertEqual(user.github_username, "brianquinlan")
-        self.assertEqual(user.last_assigned_issue_update_time, "2026-08-22T08:00:00Z")
-        self.assertEqual(user.monitored_repos, ["brianquinlan/marathon2", "google/jax"])
+        self.assertEqual(user.last_assigned_sync, dt_sync)
+        self.assertEqual(user.monitored_repos, {"brianquinlan/marathon2": None, "google/jax": None})
         self.assertEqual(user.primary_provider, "github.com")
         self.assertTrue(user.email_verified)
 
@@ -61,26 +63,27 @@ class TestUserModel(unittest.TestCase):
         self.assertEqual(dumped["github_username"], "brianquinlan")
 
     def test_user_model_dump_and_model_validate(self):
+        dt_sync = datetime(2026, 8, 22, 10, 30, tzinfo=timezone.utc)
         user = User(
             uid="user_999",
             email="google@domain.com",
             github_access_token="gho_xyz",
             github_username="octocat",
-            last_assigned_issue_update_time="2026-08-22T10:30:00Z",
-            monitored_repos=["owner/repo1"],
+            last_assigned_sync=dt_sync,
+            monitored_repos={"owner/repo1": None},
             custom_data={"role": "maintainer"},
         )
         data = user.model_dump()
         self.assertEqual(data["uid"], "user_999")
         self.assertEqual(data["github_access_token"], "gho_xyz")
-        self.assertEqual(data["monitored_repos"], ["owner/repo1"])
+        self.assertEqual(data["monitored_repos"], {"owner/repo1": None})
         self.assertEqual(data["custom_data"]["role"], "maintainer")
 
         # Reconstruct from dict
         reconstructed = User.model_validate(data)
         self.assertEqual(reconstructed.uid, user.uid)
         self.assertEqual(reconstructed.github_access_token, "gho_xyz")
-        self.assertEqual(reconstructed.monitored_repos, ["owner/repo1"])
+        self.assertEqual(reconstructed.monitored_repos, {"owner/repo1": None})
 
     def test_user_timestamps_handling(self):
         from datetime import datetime, timezone
@@ -143,7 +146,7 @@ class TestCallableFunctionLogic(unittest.TestCase):
         }
         mock_req.data = {
             "github_access_token": "gho_sample_token_xyz",
-            "monitored_repos": ["brianquinlan/marathon2", "org/awesome-project"],
+            "monitored_repos": {"brianquinlan/marathon2": None, "org/awesome-project": None},
         }
 
         result = handler(mock_req)
@@ -151,7 +154,10 @@ class TestCallableFunctionLogic(unittest.TestCase):
         self.assertEqual(result["status"], "success")
         user_res = result.get("user")
         assert isinstance(user_res, dict)
-        self.assertEqual(user_res["monitored_repos"], ["brianquinlan/marathon2", "org/awesome-project"])
+        self.assertEqual(
+            user_res["monitored_repos"],
+            {"brianquinlan/marathon2": None, "org/awesome-project": None},
+        )
         mock_doc_ref.set.assert_called_once()
 
     @patch("main.start_user_github_sync")
@@ -342,7 +348,7 @@ class TestJinjaSettingsPageCRUD(unittest.TestCase):
         mock_user_snap.to_dict.return_value = {
             "github_access_token": "ghp_secret12345678",
             "gemini_api_key": "AIzaSySecretGeminiKey",
-            "monitored_repos": ["brianquinlan/marathon2", "google/jax"],
+            "monitored_repos": {"brianquinlan/marathon2": None, "google/jax": None},
         }
         mock_user_doc.get.return_value = mock_user_snap
         mock_db.collection.return_value.document.return_value = mock_user_doc
@@ -374,7 +380,7 @@ class TestJinjaSettingsPageCRUD(unittest.TestCase):
         mock_user_snap.to_dict.return_value = {
             "github_access_token": "ghp_new_updated_token_999",
             "gemini_api_key": "AIzaSyNewGeminiKey",
-            "monitored_repos": ["org/new-repo"],
+            "monitored_repos": {"org/new-repo": None},
         }
         mock_user_doc.get.return_value = mock_user_snap
         mock_db.collection.return_value.document.return_value = mock_user_doc
@@ -415,7 +421,7 @@ class TestFirestoreUserSettingsTrigger(unittest.TestCase):
         mock_after.exists = True
         mock_after.to_dict.return_value = {
             "github_access_token": "ghp_brand_new_token_123",
-            "monitored_repos": ["brianquinlan/marathon2"],
+            "monitored_repos": {"brianquinlan/marathon2": None},
         }
 
         mock_event.data.before = mock_before
@@ -426,7 +432,7 @@ class TestFirestoreUserSettingsTrigger(unittest.TestCase):
         call_user = mock_start_sync.call_args[1]["user"]
         self.assertEqual(call_user.uid, "user_new_trig_0")
         self.assertEqual(call_user.github_access_token, "ghp_brand_new_token_123")
-        self.assertEqual(call_user.monitored_repos, ["brianquinlan/marathon2"])
+        self.assertEqual(call_user.monitored_repos, {"brianquinlan/marathon2": None})
 
     @patch("main.start_user_github_sync")
     @patch("main.db")
@@ -437,10 +443,16 @@ class TestFirestoreUserSettingsTrigger(unittest.TestCase):
         mock_event.params = {"uid": "user_trig_1"}
 
         mock_before = MagicMock()
-        mock_before.to_dict.return_value = {"github_access_token": "ghp_old_token", "monitored_repos": ["org/repo"]}
+        mock_before.to_dict.return_value = {
+            "github_access_token": "ghp_old_token",
+            "monitored_repos": {"org/repo": None},
+        }
 
         mock_after = MagicMock()
-        mock_after.to_dict.return_value = {"github_access_token": "ghp_new_token", "monitored_repos": ["org/repo"]}
+        mock_after.to_dict.return_value = {
+            "github_access_token": "ghp_new_token",
+            "monitored_repos": {"org/repo": None},
+        }
 
         mock_event.data.before = mock_before
         mock_event.data.after = mock_after
@@ -460,12 +472,15 @@ class TestFirestoreUserSettingsTrigger(unittest.TestCase):
         mock_event.params = {"uid": "user_trig_2"}
 
         mock_before = MagicMock()
-        mock_before.to_dict.return_value = {"github_access_token": "ghp_token_same", "monitored_repos": ["org/repo1"]}
+        mock_before.to_dict.return_value = {
+            "github_access_token": "ghp_token_same",
+            "monitored_repos": {"org/repo1": None},
+        }
 
         mock_after = MagicMock()
         mock_after.to_dict.return_value = {
             "github_access_token": "ghp_token_same",
-            "monitored_repos": ["org/repo1", "org/repo2"],
+            "monitored_repos": {"org/repo1": None, "org/repo2": None},
         }
 
         mock_event.data.before = mock_before
@@ -482,19 +497,19 @@ class TestFirestoreUserSettingsTrigger(unittest.TestCase):
         mock_event = MagicMock()
         mock_event.params = {"uid": "user_trig_3"}
 
-        # Only last_assigned_issue_update_time changed
+        # Only last_assigned_sync changed
         mock_before = MagicMock()
         mock_before.to_dict.return_value = {
             "github_access_token": "ghp_token_same",
-            "monitored_repos": ["org/repo1"],
-            "last_assigned_issue_update_time": "2026-08-22T00:00:00Z",
+            "monitored_repos": {"org/repo1": None},
+            "last_assigned_sync": "2026-08-22T00:00:00Z",
         }
 
         mock_after = MagicMock()
         mock_after.to_dict.return_value = {
             "github_access_token": "ghp_token_same",
-            "monitored_repos": ["org/repo1"],
-            "last_assigned_issue_update_time": "2026-08-22T01:00:00Z",
+            "monitored_repos": {"org/repo1": None},
+            "last_assigned_sync": "2026-08-22T01:00:00Z",
         }
 
         mock_event.data.before = mock_before
@@ -515,7 +530,7 @@ class TestFirestoreUserSettingsTrigger(unittest.TestCase):
         mock_before.to_dict.return_value = {}
 
         mock_after = MagicMock()
-        mock_after.to_dict.return_value = {"monitored_repos": ["org/repo1"]}
+        mock_after.to_dict.return_value = {"monitored_repos": {"org/repo1": None}}
 
         mock_event.data.before = mock_before
         mock_event.data.after = mock_after

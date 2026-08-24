@@ -38,7 +38,7 @@
     <br>
     <div>
       <label for="monitored_repos">Monitored Repositories:</label><br>
-      <input type="text" id="monitored_repos" name="monitored_repos" value="{{ user.monitored_repos|join(', ') if user.monitored_repos else '' }}">
+      <input type="text" id="monitored_repos" name="monitored_repos" value="{{ user.monitored_repos.keys()|join(', ') if user.monitored_repos else '' }}">
     </div>
     <br>
     <button type="submit">Save Settings</button>

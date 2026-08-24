@@ -7,11 +7,9 @@ from __future__ import annotations
 
 import json
 import os
-import random
-import threading
-import time
 from typing import Protocol, TypeVar
 
+import google.genai as genai
 from pydantic import BaseModel, ConfigDict, Field
 from pydantic_ai import Agent
 from pydantic_ai.models.google import GoogleModel
@@ -51,10 +49,6 @@ TTask = TypeVar("TTask", bound=TaskProtocol)
 # Ranker Engine: Pydantic AI & Gemini Flash
 # ============================================================================
 
-_pydantic_ai_agents: dict[tuple[str, str], Agent[None, TaskPriorityOutput]] = {}
-_agent_lock = threading.Lock()
-
-
 DEFAULT_SYSTEM_PROMPT = """You are my executive engineering assistant. Your role is to rank GitHub issues and pull requests (PRs) so that I focus on items that maximize my development and review efficiency.
 
 The most important thing to consider when deciding an issue's priority is how actionable it is. If an issue is not actionable, there is no point in considering it.
@@ -75,24 +69,30 @@ Issues created or commented-on by my usual collaborators are more important than
 Issues with recent activity are higher priority than dormant issues."""
 
 
+def create_pydantic_ai_agent(
+    api_key: str | None = None, system_prompt: str | None = None
+) -> Agent[None, TaskPriorityOutput]:
+    """
+    Creates an ephemeral Pydantic AI Agent instance configured with the Google Gemini model.
+    No client or agent state is cached across task invocations,
+    preventing any cross-thread asyncio client or event loop contention.
+    """
+    effective_key = api_key or os.environ.get("GEMINI_API_KEY") or os.environ.get("GOOGLE_API_KEY") or "placeholder"
+    prompt_str = system_prompt if system_prompt is not None else DEFAULT_SYSTEM_PROMPT
+
+    client = genai.Client(api_key=effective_key)
+    provider = GoogleProvider(client=client)
+    model = GoogleModel("gemini-3.7-flash", provider=provider)
+    return Agent(model=model, output_type=TaskPriorityOutput, system_prompt=prompt_str)
+
+
 def get_pydantic_ai_agent(
     api_key: str | None = None, system_prompt: str | None = None
 ) -> Agent[None, TaskPriorityOutput]:
     """
-    Lazily initializes and caches Pydantic AI Agent instances configured with Google Gemini model.
+    Backwards-compatible alias for creating an ephemeral Pydantic AI Agent.
     """
-    effective_key = api_key or os.environ.get("GEMINI_API_KEY") or ""
-    prompt_str = system_prompt if system_prompt is not None else DEFAULT_SYSTEM_PROMPT
-    cache_key = (effective_key, prompt_str)
-
-    with _agent_lock:
-        if cache_key not in _pydantic_ai_agents:
-            provider = GoogleProvider(api_key=effective_key)
-            model = GoogleModel("gemini-3.7-flash", provider=provider)
-            _pydantic_ai_agents[cache_key] = Agent(
-                model=model, output_type=TaskPriorityOutput, system_prompt=prompt_str
-            )
-        return _pydantic_ai_agents[cache_key]
+    return create_pydantic_ai_agent(api_key=api_key, system_prompt=system_prompt)
 
 
 def run_ranker(
@@ -127,32 +127,9 @@ GitHub Issue & Comments Data (JSON):
 Please evaluate the priority for the user {user_info_str} based on your system instructions and assign a priority score between 0.0 and 1.0.
 """.strip()
 
-    active_agent = agent or get_pydantic_ai_agent(api_key=gemini_api_key, system_prompt=DEFAULT_SYSTEM_PROMPT)
+    active_agent = agent or create_pydantic_ai_agent(api_key=gemini_api_key, system_prompt=DEFAULT_SYSTEM_PROMPT)
 
-    max_attempts = 4
-    result = None
-    for attempt in range(1, max_attempts + 1):
-        try:
-            result = active_agent.run_sync(user_prompt=prompt_text)
-            break
-        except Exception as e:
-            err_str = str(e).lower()
-            is_rate_limit = (
-                "429" in err_str
-                or "resource_exhausted" in err_str
-                or "resourceexhausted" in err_str
-                or "quota" in err_str
-                or "too many requests" in err_str
-                or "rate" in err_str
-            )
-            if is_rate_limit and attempt < max_attempts:
-                sleep_secs = (2 ** (attempt - 1)) + random.uniform(0.5, 1.5)
-                time.sleep(sleep_secs)
-            else:
-                raise
-
-    if result is None:
-        raise RuntimeError(f"Failed to get response for task {task.doc_id} after {max_attempts} attempts.")
+    result = active_agent.run_sync(user_prompt=prompt_text)
 
     computed_priority = 0.5
     output_obj = result.output

@@ -225,40 +225,24 @@ class TestRankerEngine(unittest.TestCase):
         self.assertEqual(ranked.priority, 0.92)
         self.assertFalse(ranked.priority_needs_updated)
 
+    @patch("genai_ranker.genai.Client")
     @patch("genai_ranker.GoogleProvider")
     @patch("genai_ranker.GoogleModel")
     @patch("genai_ranker.Agent")
-    def test_get_pydantic_ai_agent_uses_gemini_api_key(self, mock_agent_cls, mock_model_cls, mock_provider_cls):
-        from genai_ranker import _pydantic_ai_agents, get_pydantic_ai_agent
+    def test_get_pydantic_ai_agent_uses_gemini_api_key(
+        self, mock_agent_cls, mock_model_cls, mock_provider_cls, mock_client_cls
+    ):
+        from genai_ranker import get_pydantic_ai_agent
 
-        _pydantic_ai_agents.clear()
         mock_agent_instance = MagicMock()
         mock_agent_cls.return_value = mock_agent_instance
 
         agent = get_pydantic_ai_agent(api_key="custom_key_12345")
-        mock_provider_cls.assert_called_with(api_key="custom_key_12345")
+        mock_client_cls.assert_called_once()
+        self.assertEqual(mock_client_cls.call_args[1].get("api_key"), "custom_key_12345")
         self.assertEqual(agent, mock_agent_instance)
 
-    @patch("time.sleep", return_value=None)
-    def test_run_ranker_retries_on_rate_limit(self, mock_sleep):
-        mock_agent = MagicMock()
-        mock_res = MagicMock()
-        mock_res.output = TaskPriorityOutput(priority=0.85, reasoning="High urgency after retry")
-        # First call fails with 429 rate limit, second succeeds
-        mock_agent.run_sync.side_effect = [
-            RuntimeError("429 Too Many Requests: Resource has been exhausted"),
-            mock_res,
-        ]
-
-        task = Task(owner="owner", repo="repo", issue_number=1, priority=0.0, priority_needs_updated=True)
-        ranked = run_ranker(task=task, gemini_api_key="key", agent=mock_agent)
-        self.assertEqual(ranked.priority, 0.85)
-        self.assertFalse(ranked.priority_needs_updated)
-        self.assertEqual(mock_agent.run_sync.call_count, 2)
-        mock_sleep.assert_called_once()
-
-    @patch("time.sleep", return_value=None)
-    def test_run_ranker_raises_on_error(self, mock_sleep):
+    def test_run_ranker_raises_on_error(self):
         mock_agent = MagicMock()
         mock_agent.run_sync.side_effect = RuntimeError("Non-recoverable fatal error")
 
