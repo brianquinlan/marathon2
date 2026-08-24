@@ -4,6 +4,7 @@ Dispatches asynchronous tasks via threads when running under the Firebase Emulat
 and via Firebase Task Queues (firebase_admin.functions.task_queue) in production.
 """
 
+import logging
 import os
 import threading
 from collections.abc import Callable
@@ -30,7 +31,7 @@ def _safe_run_worker(worker_fn: Callable[[], object]) -> None:
     try:
         worker_fn()
     except Exception:
-        pass
+        logging.exception("background worker failed")
 
 
 def dispatch_task(
