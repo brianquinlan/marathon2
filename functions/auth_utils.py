@@ -3,12 +3,8 @@ Authentication utility helpers for Firebase Python backend.
 Supports identifying and verifying Google and GitHub OAuth providers.
 """
 
-import logging
-
 from firebase_admin import auth
 from firebase_functions import https_fn
-
-logger = logging.getLogger(__name__)
 
 SUPPORTED_PROVIDERS = {
     "google.com": "Google",
@@ -83,7 +79,6 @@ def fetch_full_user_auth_record(uid: str) -> dict[str, object]:
             "last_sign_in_timestamp": user_record.user_metadata.last_sign_in_timestamp,
         }
     except Exception as e:
-        logger.error(f"Error fetching auth user record for UID {uid}: {e}")
         return {"uid": uid, "error": str(e)}
 
 

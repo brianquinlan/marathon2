@@ -8,7 +8,6 @@ Supports:
 """
 
 import json
-import logging
 import os
 
 import firebase_admin
@@ -23,10 +22,6 @@ from auth_utils import extract_provider_info, fetch_full_user_auth_record, verif
 from github_sync import start_user_github_sync, sync_all_users_closed_issues
 from task import enqueue_task_ranking, force_rerank_tasks, get_user_tasks, update_task_priority
 from user import User
-
-# Configure logging
-logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger(__name__)
 
 # Jinja2 Environment for server-side HTML rendering
 TEMPLATES_DIR = os.path.join(os.path.dirname(__file__), "templates")
@@ -65,8 +60,8 @@ def render_main_page(req: https_fn.Request) -> Response:
     if token_str:
         try:
             decoded_token = auth.verify_id_token(token_str)
-        except Exception as e:
-            logger.debug(f"ID token verification failed or expired: {e}")
+        except Exception:
+            pass
 
     template = jinja_env.get_template("main.html")
 
@@ -133,8 +128,8 @@ def render_settings_page(req: https_fn.Request) -> Response:
     if token_str:
         try:
             decoded_token = auth.verify_id_token(token_str)
-        except Exception as e:
-            logger.debug(f"Token verification failed: {e}")
+        except Exception:
+            pass
 
     if not decoded_token:
         # Redirect unauthenticated users to / for login
@@ -278,7 +273,6 @@ def associate_user_info(req: https_fn.CallableRequest) -> dict[str, object]:
         action = "created"
 
     user_ref.set({**user.model_dump(), "updated_at": SERVER_TIMESTAMP}, merge=True)
-    logger.info(f"User {action} in Firestore for UID {uid} (provider: {provider_info.get('primary_provider_name')})")
 
     return {
         "status": "success",
@@ -358,7 +352,6 @@ def sync_auth_profile(req: https_fn.CallableRequest) -> dict[str, object]:
     user.linked_providers = [str(x) for x in raw_linked] if isinstance(raw_linked, list) else []
 
     user_ref.set({**user.model_dump(), "updated_at": SERVER_TIMESTAMP}, merge=True)
-    logger.info(f"Synchronized User auth profile for UID {uid}")
 
     return {
         "status": "success",
@@ -385,7 +378,6 @@ def delete_user_info(req: https_fn.CallableRequest) -> dict[str, object]:
 
     if doc_snap.exists:
         user_ref.delete()
-        logger.info(f"Deleted User document for UID {uid}")
         return {"status": "success", "message": f"User document for UID {uid} has been deleted."}
     else:
         return {"status": "not_found", "message": "No User document found for this user."}
@@ -435,7 +427,6 @@ def sync_github_issues(req: https_fn.CallableRequest) -> dict[str, object]:
         result = start_user_github_sync(user=user, db=db, state=state)
         return result
     except Exception as e:
-        logger.error(f"Error starting GitHub sync for UID {uid}: {e}")
         raise https_fn.HttpsError(
             code=https_fn.FunctionsErrorCode.INTERNAL, message=f"Failed to start GitHub sync: {e!s}"
         ) from e
@@ -511,7 +502,6 @@ def rank_user_tasks(req: tasks_fn.CallableRequest) -> None:
             code=tasks_fn.FunctionsErrorCode.INVALID_ARGUMENT, message="Missing 'uid' or 'task_id' in task payload."
         )
 
-    logger.info(f"Executing asynchronous ranking for task {task_id} (UID {uid}) in Task Queue worker.")
     update_task_priority(uid=uid, task_id=task_id, db=db)
 
 
@@ -537,7 +527,6 @@ def force_rerank_all_tasks(req: https_fn.CallableRequest) -> dict[str, object]:
         result = force_rerank_tasks(uid=uid, db=db)
         return result
     except Exception as e:
-        logger.error(f"Error forcing task rerank for UID {uid}: {e}")
         raise https_fn.HttpsError(
             code=https_fn.FunctionsErrorCode.INTERNAL, message=f"Failed to force rerank tasks: {e!s}"
         ) from e
@@ -690,7 +679,6 @@ def scheduled_sync_closed_issues(event: scheduler_fn.ScheduledEvent) -> None:
     Scheduled function that runs every 5 minutes to detect closed GitHub issues
     and remove them from users' task lists in Firestore.
     """
-    logger.info("Starting scheduled 5-minute sync for closed GitHub issues.")
     sync_all_users_closed_issues(db=db)
 
 
@@ -708,7 +696,6 @@ def on_user_settings_changed(
     settings (github_access_token or monitored_repos) are newly created or changed.
     """
     if event.data is None or event.data.after is None:
-        logger.info("User document was deleted; skipping GitHub sync.")
         return
 
     after_snap = event.data.after
@@ -716,7 +703,6 @@ def on_user_settings_changed(
 
     # If document does not exist after write, do nothing
     if not after_snap.exists:
-        logger.info("User document does not exist after write; skipping.")
         return
 
     after_data = after_snap.to_dict() or {}
@@ -732,7 +718,6 @@ def on_user_settings_changed(
     before_repos = sorted(before_data.get("monitored_repos") or [])
 
     if not after_token:
-        logger.info(f"User {event.params.get('uid')} has no github_access_token configured; skipping sync.")
         return
 
     token_changed = after_token != before_token
@@ -741,11 +726,6 @@ def on_user_settings_changed(
     if is_new or token_changed or repos_changed:
         uid = event.params.get("uid")
         if uid:
-            logger.info(
-                f"User settings created/changed for UID {uid} "
-                f"(is_new={is_new}, token_changed={token_changed}, repos_changed={repos_changed}). "
-                f"Triggering background GitHub sync."
-            )
             user = User.model_validate({**after_data, "uid": str(uid)})
             start_user_github_sync(user=user, db=db, state="open")
 
@@ -763,48 +743,22 @@ def on_task_written(event: firestore_fn.Event[firestore_fn.Change[firestore_fn.D
     """
     uid = event.params.get("uid")
     task_id = event.params.get("task_id")
-    logger.info(f"[TRIGGER:on_task_written] Fired for users/{uid}/tasks/{task_id}")
 
     if event.data is None or event.data.after is None:
-        logger.info(
-            f"[TRIGGER:on_task_written] Task document was deleted for users/{uid}/tasks/{task_id}; skipping rerank trigger."
-        )
         return
 
     after_snap = event.data.after
-    before_snap = event.data.before
 
     # If document does not exist after write, do nothing
     if not after_snap.exists:
-        logger.info(
-            f"[TRIGGER:on_task_written] Task document does not exist after write for users/{uid}/tasks/{task_id}; skipping."
-        )
         return
 
     after_data = after_snap.to_dict() or {}
     after_needs_update = after_data.get("priority_needs_updated", False)
-    after_priority = after_data.get("priority", 0.0)
-
-    is_new = (before_snap is None) or not before_snap.exists
-    before_data = {}
-    if not is_new and before_snap is not None:
-        before_data = before_snap.to_dict() or {}
-    before_needs_update = before_data.get("priority_needs_updated", False)
-    before_priority = before_data.get("priority", 0.0)
-
-    logger.info(
-        f"[TRIGGER:on_task_written] users/{uid}/tasks/{task_id}: is_new={is_new}, "
-        f"before(priority={before_priority}, needs_update={before_needs_update}), "
-        f"after(priority={after_priority}, needs_update={after_needs_update})"
-    )
 
     # Only trigger reranking if priority_needs_updated is True (prevents loop when ranker sets it to False)
     if not after_needs_update:
-        logger.info(
-            f"[TRIGGER:on_task_written] after_needs_update is False for users/{uid}/tasks/{task_id}; skipping rerank."
-        )
         return
 
     if uid and task_id:
-        logger.info(f"[TRIGGER:on_task_written] Enqueuing ranking for UID {uid}, task {task_id}.")
         enqueue_task_ranking(uid=str(uid), task_id=str(task_id), function_name="rank_user_tasks", db=db)

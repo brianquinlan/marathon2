@@ -6,7 +6,6 @@ Evaluates individual tasks with GitHub issue metadata, comments, and username me
 from __future__ import annotations
 
 import json
-import logging
 import os
 import random
 import threading
@@ -17,8 +16,6 @@ from pydantic import BaseModel, ConfigDict, Field
 from pydantic_ai import Agent
 from pydantic_ai.models.google import GoogleModel
 from pydantic_ai.providers.google import GoogleProvider
-
-logger = logging.getLogger(__name__)
 
 
 class TaskPriorityOutput(BaseModel):
@@ -111,18 +108,6 @@ def run_ranker(
     Accepts full structured issue and comments JSON, the current user's GitHub username,
     and the user's Gemini API key.
     """
-    logger.info(
-        f"[RANKER] Starting task ranking for doc={task.doc_id}: "
-        f"github_username={github_username}, has_gemini_key={bool(gemini_api_key)}, "
-        f"current_priority={task.priority}, current_needs_updated={task.priority_needs_updated}"
-    )
-
-    if not gemini_api_key and not os.environ.get("GEMINI_API_KEY"):
-        logger.warning(
-            f"[RANKER] No Gemini API key provided for task {task.doc_id}. "
-            f"Please set a Gemini API key in user settings or GEMINI_API_KEY in environment."
-        )
-
     # Serialize issue and comment data to JSON directly for the LLM
     if isinstance(issue, BaseModel):
         issue_json_str = issue.model_dump_json(indent=2)
@@ -132,8 +117,6 @@ def run_ranker(
         issue_json_str = "{}"
 
     user_info_str = f"@{github_username}" if github_username else "Unknown (not specified)"
-
-    logger.info(f"[RANKER] Issue payload for {task.doc_id}: JSON length={len(issue_json_str)} characters")
 
     prompt_text = f"""
 Current User GitHub Username: {user_info_str}
@@ -145,7 +128,6 @@ Please evaluate the priority for the user {user_info_str} based on your system i
 """.strip()
 
     active_agent = agent or get_pydantic_ai_agent(api_key=gemini_api_key, system_prompt=DEFAULT_SYSTEM_PROMPT)
-    logger.info(f"[RANKER] Executing synchronous run_sync with Pydantic AI for task {task.doc_id}...")
 
     max_attempts = 4
     result = None
@@ -165,34 +147,22 @@ Please evaluate the priority for the user {user_info_str} based on your system i
             )
             if is_rate_limit and attempt < max_attempts:
                 sleep_secs = (2 ** (attempt - 1)) + random.uniform(0.5, 1.5)
-                logger.warning(
-                    f"[RANKER] Rate limit hit for {task.doc_id} (attempt {attempt}/{max_attempts}). "
-                    f"Retrying in {sleep_secs:.2f}s: {e}"
-                )
                 time.sleep(sleep_secs)
             else:
                 raise
 
     if result is None:
-        raise RuntimeError(f"[RANKER] Failed to get response for task {task.doc_id} after {max_attempts} attempts.")
-
-    logger.info(f"[RANKER] Pydantic AI call succeeded for {task.doc_id}. Output: {result.output}")
+        raise RuntimeError(f"Failed to get response for task {task.doc_id} after {max_attempts} attempts.")
 
     computed_priority = 0.5
     output_obj = result.output
     if output_obj is not None:
         if isinstance(output_obj, TaskPriorityOutput):
             computed_priority = output_obj.priority
-            logger.info(
-                f"[RANKER] Parsed TaskPriorityOutput: priority={computed_priority}, reasoning='{output_obj.reasoning}'"
-            )
         elif isinstance(output_obj, dict):
             computed_priority = float(output_obj.get("priority", 0.5))
-            logger.info(f"[RANKER] Parsed dict output: priority={computed_priority}")
 
     computed_priority = max(0.0, min(1.0, float(computed_priority)))
     task.priority = computed_priority
-    logger.info(f"[RANKER] Successfully assigned priority {task.priority:.2f} to task {task.doc_id}")
-
     task.priority_needs_updated = False
     return task

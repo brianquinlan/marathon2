@@ -5,7 +5,6 @@ and dispatches asynchronous ranking tasks using Firebase Task Queue Functions (f
 See: https://firebase.google.com/docs/functions/task-functions#python
 """
 
-import logging
 from datetime import datetime
 
 from firebase_admin import functions as admin_functions
@@ -14,8 +13,6 @@ from pydantic import BaseModel, ConfigDict
 from queue_utils import dispatch_task
 
 from genai_ranker import run_ranker
-
-logger = logging.getLogger(__name__)
 
 
 class Task(BaseModel):
@@ -127,22 +124,15 @@ def update_task_priority(uid: str, task_id: str, db: firestore.Client) -> None:
     GitHub issue and comments in-memory using the user's github_access_token, calls the
     ranker, and persists the updated priority back to Firestore.
     """
-    logger.info(f"[UPDATE_TASK_PRIORITY] Starting update_task_priority: uid={uid}, task_id={task_id}")
     task_ref = db.collection("users").document(uid).collection("tasks").document(task_id)
     doc_snap = task_ref.get()
     if not doc_snap.exists:
-        logger.warning(f"[UPDATE_TASK_PRIORITY] Task document {task_id} NOT found for UID {uid}.")
         return
 
     raw_task_data = doc_snap.to_dict()
     if not isinstance(raw_task_data, dict):
         raw_task_data = {}
     task = Task.model_validate(raw_task_data)
-    logger.info(
-        f"[UPDATE_TASK_PRIORITY] Loaded task {task_id}: title='{task.github_issue_title}', "
-        f"priority={task.priority}, priority_needs_updated={task.priority_needs_updated}, "
-        f"doc_id='{task.doc_id}'"
-    )
 
     # Fetch user profile to get github_access_token, github_username and gemini_api_key
     user_ref = db.collection("users").document(uid)
@@ -158,12 +148,6 @@ def update_task_priority(uid: str, task_id: str, db: firestore.Client) -> None:
         github_username = str(raw_u_name) if raw_u_name is not None else None
         raw_key = u_dict.get("gemini_api_key")
         gemini_api_key = str(raw_key) if raw_key is not None else None
-        logger.info(
-            f"[UPDATE_TASK_PRIORITY] User profile loaded: github_username='{github_username}', "
-            f"has_token={bool(github_access_token)}, has_gemini_key={bool(gemini_api_key)}"
-        )
-    else:
-        logger.warning(f"[UPDATE_TASK_PRIORITY] User profile document users/{uid} does not exist.")
 
     # Fetch issue details and comments in-memory via PyGithub
     from genai_ranker import IssuePayload
@@ -192,12 +176,8 @@ def update_task_priority(uid: str, task_id: str, db: firestore.Client) -> None:
                 repo=repo,
                 issue_number=num,
             )
-            comments_len = len(issue_payload.comments)
-            logger.info(
-                f"[UPDATE_TASK_PRIORITY] Fetched in-memory issue {owner}/{repo}#{num} with {comments_len} comments."
-            )
-        except Exception as e:
-            logger.warning(f"[UPDATE_TASK_PRIORITY] Error fetching in-memory issue data for {owner}/{repo}#{num}: {e}")
+        except Exception:
+            pass
 
     # If in-memory fetch wasn't available, provide basic fallback dict from task cached fields
     if not issue_payload:
@@ -216,12 +196,7 @@ def update_task_priority(uid: str, task_id: str, db: firestore.Client) -> None:
         "priority_needs_updated": False,
         "updated_at": firestore.SERVER_TIMESTAMP,
     }
-    logger.info(f"[UPDATE_TASK_PRIORITY] Writing updated task {task_id} to Firestore with payload: {update_payload}")
     task_ref.set(update_payload, merge=True)
-
-    logger.info(
-        f"[UPDATE_TASK_PRIORITY] Successfully updated priority for task {task_id} for user {uid} -> {ranked_task.priority:.2f}."
-    )
 
 
 def force_rerank_tasks(uid: str, db: firestore.Client) -> dict[str, object]:
@@ -249,7 +224,6 @@ def force_rerank_tasks(uid: str, db: firestore.Client) -> dict[str, object]:
 
     if count > 0:
         batch.commit()
-        logger.info(f"Marked {count} tasks as priority_needs_updated=True for forced rerank.")
 
     return {
         "status": "marked",

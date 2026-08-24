@@ -10,7 +10,6 @@ Uses asynchronous chained Firebase Task Queue Functions (with seamless local fal
 NOTE: Tasks are ONLY created/updated once an Issue and all of its comments are fully imported into Firestore.
 """
 
-import logging
 import re
 from collections.abc import Mapping
 from datetime import datetime, timezone
@@ -25,8 +24,6 @@ from queue_utils import dispatch_task
 from genai_ranker import IssuePayload
 from task import ensure_task_for_issue
 from user import User
-
-logger = logging.getLogger(__name__)
 
 GITHUB_API_BASE_URL = "https://api.github.com"
 
@@ -61,8 +58,7 @@ def _parse_github_datetime(dt_val: object) -> datetime | None:
         try:
             clean_str = dt_val.replace("Z", "+00:00")
             return datetime.fromisoformat(clean_str)
-        except Exception as e:
-            logger.warning(f"Failed to parse datetime '{dt_val}': {e}")
+        except Exception:
             return None
     return None
 
@@ -142,11 +138,9 @@ def fetch_single_issue_page_pygithub(
         if e.status in (401, 403):
             raise PermissionError(f"GitHub API authorization error ({e.status}): {e.data}") from e
         elif e.status == 404:
-            logger.warning(f"GitHub repository/endpoint not found: {repo_full_name or filter_name}")
             return [], False
         raise
-    except Exception as e:
-        logger.error(f"Error fetching issue page (page={page}): {e}")
+    except Exception:
         return [], False
 
 
@@ -222,8 +216,7 @@ def fetch_single_issue_page(
         return items_dict, next_url
     except PermissionError:
         raise
-    except Exception as e:
-        logger.error(f"Error fetching issue page from {url}: {e}")
+    except Exception:
         return [], None
 
 
@@ -266,7 +259,6 @@ def process_and_save_issue_page(
     the associated Task document in Firestore (users/{uid}/tasks/task_{doc_id}).
     Does not store intermediate issue documents in Firestore.
     """
-    count = 0
     for item in raw_items:
         raw_num = item.get("number", 0)
         issue_number = int(raw_num) if isinstance(raw_num, (int, str)) and str(raw_num).isdigit() else 0
@@ -293,9 +285,6 @@ def process_and_save_issue_page(
 
         # Create/update Task directly in Firestore
         ensure_task_for_issue(uid=uid, issue_id=doc_id, issue_data=issue_payload, db=db)
-        count += 1
-
-    logger.info(f"Processed and created/updated tasks for {count} issues for UID {uid} under reason '{reason}'.")
 
 
 def execute_issue_page_sync(
@@ -347,7 +336,6 @@ def execute_issue_page_sync(
             repo_fallback=repo_fallback,
             db=db,
         )
-        logger.info(f"Chained next issue page task for URL: {next_url}")
 
 
 def enqueue_issue_page_sync(
@@ -398,11 +386,7 @@ def fetch_github_user_login(access_token: str) -> str | None:
         if login:
             return str(login)
         return None
-    except GithubException as e:
-        logger.warning(f"Failed to fetch GitHub user login: HTTP {e.status} - {e.data}")
-        return None
-    except Exception as e:
-        logger.error(f"Exception fetching GitHub user login: {e}")
+    except Exception:
         return None
 
 
@@ -438,7 +422,6 @@ def start_user_github_sync(user: User, db: firestore.Client, state: str = "open"
                 },
                 merge=True,
             )
-            logger.info(f"Discovered and stored github_username '{login}' for UID {user_uid}")
 
     since = user.last_assigned_issue_update_time
     enqueued_tasks: list[dict[str, object]] = []
@@ -502,7 +485,6 @@ def start_user_github_sync(user: User, db: firestore.Client, state: str = "open"
         merge=True,
     )
 
-    logger.info(f"Started GitHub sync pipeline for UID {user_uid} ({len(enqueued_tasks)} initial queues scheduled).")
     return {
         "status": "enqueued",
         "uid": user_uid,
@@ -576,7 +558,6 @@ def sync_closed_issues_for_user(user: User, db: firestore.Client, client: Github
             closed_items.append(it)
 
     # Process and remove closed issues from tasks
-    closed_count = 0
     tasks_col = db.collection("users").document(user_uid).collection("tasks")
 
     seen_doc_ids: set[str] = set()
@@ -604,8 +585,6 @@ def sync_closed_issues_for_user(user: User, db: firestore.Client, client: Github
         task_snap = task_ref.get()
         if task_snap.exists:
             task_ref.delete()
-            closed_count += 1
-            logger.info(f"Deleted task {task_doc_id} for UID {user_uid} because GitHub issue was closed.")
 
     # Update sync timestamp
     now_iso = datetime.now(timezone.utc).isoformat()
@@ -617,8 +596,6 @@ def sync_closed_issues_for_user(user: User, db: firestore.Client, client: Github
         },
         merge=True,
     )
-
-    logger.info(f"Closed issue sync completed for UID {user_uid}: {closed_count} tasks removed.")
 
 
 def sync_all_users_closed_issues(db: firestore.Client) -> None:
@@ -634,5 +611,5 @@ def sync_all_users_closed_issues(db: firestore.Client) -> None:
         if user.github_access_token:
             try:
                 sync_closed_issues_for_user(user=user, db=db)
-            except Exception as e:
-                logger.error(f"Error syncing closed issues for UID {user.uid}: {e}")
+            except Exception:
+                pass

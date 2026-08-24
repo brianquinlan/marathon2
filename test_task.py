@@ -103,7 +103,7 @@ class TestQueueUtils(unittest.TestCase):
             raise ValueError("Worker crash")
 
         # Must not raise
-        _safe_run_worker(bad_worker, "test_queue")
+        _safe_run_worker(bad_worker)
 
 
 class TestTaskModel(unittest.TestCase):
