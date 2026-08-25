@@ -128,6 +128,20 @@ def ensure_task_for_issue(
     task_ref.set(task_data, merge=True)
 
 
+def delete_task_for_issue(uid: str, issue_id: str, db: firestore.Client) -> bool:
+    """
+    Deletes the Task associated with a given issue in Firestore under users/{uid}/tasks/task_{issue_id}.
+    Returns True if the document existed and was deleted, False otherwise.
+    """
+    task_doc_id = f"task_{issue_id}"
+    task_ref = db.collection("users").document(uid).collection("tasks").document(task_doc_id)
+    doc_snap = task_ref.get()
+    if doc_snap.exists:
+        task_ref.delete()
+        return True
+    return False
+
+
 def delete_all_user_tasks(uid: str, db: firestore.Client) -> int:
     """
     Deletes all tasks for a given user from Firestore.

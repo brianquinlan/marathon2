@@ -7,6 +7,7 @@ Firestore persistence, and ensuring Tasks are ONLY created once an Issue and all
 import os
 import sys
 import unittest
+from datetime import datetime, timezone
 from unittest.mock import ANY, MagicMock, patch
 
 # Add functions to path
@@ -15,13 +16,14 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "functions"))
 from github_sync import (
     IssuePayload,
     enqueue_issue_page_sync,
+    enqueue_user_periodic_sync,
     fetch_github_user_login,
     fetch_issue_in_memory,
     fetch_single_issue_page,
     get_github_client,
     process_and_save_issue_page,
     start_user_github_sync,
-    sync_closed_issues_for_user,
+    sync_user_periodic,
 )
 from user import User
 
@@ -203,35 +205,127 @@ class TestGitHubUserLoginDiscovery(unittest.TestCase):
 
 
 class TestClosedIssuesSync(unittest.TestCase):
-    @patch("github_sync.fetch_single_issue_page")
-    def test_sync_closed_issues_for_user_deletes_tasks(self, mock_fetch):
+    @patch("github_sync.delete_task_for_issue")
+    @patch("github_sync.ensure_task_for_issue")
+    def test_process_and_save_issue_page_handles_open_and_closed_issues(self, mock_ensure, mock_delete):
         mock_db = MagicMock()
-        mock_user_doc = MagicMock()
-        mock_tasks_col = MagicMock()
 
-        mock_task_ref = MagicMock()
-        mock_task_snap = MagicMock()
-        mock_task_snap.exists = True
-        mock_task_ref.get.return_value = mock_task_snap
+        # 1. Closed issue
+        closed_issue = MagicMock()
+        closed_issue.number = 101
+        closed_issue.state = "closed"
+        closed_issue.repository.owner.login = "brianquinlan"
+        closed_issue.repository.name = "marathon2"
 
-        mock_db.collection.return_value.document.return_value = mock_user_doc
-        mock_user_doc.collection.return_value = mock_tasks_col
-        mock_tasks_col.document.return_value = mock_task_ref
+        # 2. Open issue
+        open_issue = MagicMock()
+        open_issue.number = 102
+        open_issue.state = "open"
+        open_issue.title = "Open Feature"
+        open_issue.html_url = "https://github.com/brianquinlan/marathon2/issues/102"
+        open_issue.repository.owner.login = "brianquinlan"
+        open_issue.repository.name = "marathon2"
 
-        # Return 1 closed issue from GitHub
-        mock_issue = MagicMock()
-        mock_issue.number = 99
-        mock_issue.repository.owner.login = "brianquinlan"
-        mock_issue.repository.name = "marathon2"
-
-        mock_fetch.return_value = ([mock_issue], False)
-
-        user = User(
-            uid="user_closed_1", github_access_token="gho_test_closed", monitored_repos={"brianquinlan/marathon2": None}
+        process_and_save_issue_page(
+            uid="user_closed_test",
+            issues=[closed_issue, open_issue],
+            db=mock_db,
+            source="monitored",
         )
 
-        sync_closed_issues_for_user(user=user, db=mock_db)
-        mock_task_ref.delete.assert_called_once()
+        mock_delete.assert_called_once_with(
+            uid="user_closed_test",
+            issue_id="brianquinlan_marathon2_101",
+            db=mock_db,
+        )
+        mock_ensure.assert_called_once()
+        self.assertEqual(mock_ensure.call_args[1]["issue_id"], "brianquinlan_marathon2_102")
+        self.assertEqual(mock_ensure.call_args[1]["source"], "monitored")
+
+
+class TestPeriodicUserSync(unittest.TestCase):
+    @patch("github_sync.start_user_github_sync")
+    def test_sync_user_periodic_runs_unified_sync(self, mock_start_sync):
+        mock_db = MagicMock()
+        mock_user_doc = MagicMock()
+        mock_user_snap = MagicMock()
+
+        mock_db.collection.return_value.document.return_value = mock_user_doc
+        mock_user_doc.get.return_value = mock_user_snap
+        mock_user_snap.exists = True
+        mock_user_snap.to_dict.return_value = {
+            "github_access_token": "ghp_periodic_token_123",
+            "monitored_repos": {"brianquinlan/marathon2": None},
+        }
+
+        mock_start_sync.return_value = {"status": "enqueued"}
+
+        result = sync_user_periodic("user_periodic_1", mock_db)
+        self.assertEqual(result["status"], "success")
+        self.assertEqual(result["uid"], "user_periodic_1")
+        mock_start_sync.assert_called_once()
+
+    @patch("github_sync.enqueue_issue_page_sync")
+    def test_start_user_github_sync_states_open_vs_all(self, mock_enqueue):
+        mock_db = MagicMock()
+
+        # User with sync timestamps (incremental sync -> state="all")
+        now = datetime.now(timezone.utc)
+        user_incremental = User(
+            uid="user_inc",
+            github_access_token="ghp_token_inc",
+            last_assigned_sync=now,
+            monitored_repos={"brianquinlan/marathon2": now},
+        )
+        start_user_github_sync(user=user_incremental, db=mock_db)
+
+        # Assigned filter and monitored repo should have state="all"
+        assigned_call = next(c for c in mock_enqueue.call_args_list if c[1].get("filter_name") == "assigned")
+        self.assertEqual(assigned_call[1]["state"], "all")
+        repo_call = next(
+            c for c in mock_enqueue.call_args_list if c[1].get("repo_full_name") == "brianquinlan/marathon2"
+        )
+        self.assertEqual(repo_call[1]["state"], "all")
+
+        mock_enqueue.reset_mock()
+
+        # User without sync timestamps (initial sync -> state="open")
+        user_initial = User(
+            uid="user_init",
+            github_access_token="ghp_token_init",
+            last_assigned_sync=None,
+            monitored_repos={"brianquinlan/marathon2": None},
+        )
+        start_user_github_sync(user=user_initial, db=mock_db)
+
+        assigned_init = next(c for c in mock_enqueue.call_args_list if c[1].get("filter_name") == "assigned")
+        self.assertEqual(assigned_init[1]["state"], "open")
+        repo_init = next(
+            c for c in mock_enqueue.call_args_list if c[1].get("repo_full_name") == "brianquinlan/marathon2"
+        )
+        self.assertEqual(repo_init[1]["state"], "open")
+
+    def test_sync_user_periodic_skipped_if_no_token(self):
+        mock_db = MagicMock()
+        mock_user_doc = MagicMock()
+        mock_user_snap = MagicMock()
+
+        mock_db.collection.return_value.document.return_value = mock_user_doc
+        mock_user_doc.get.return_value = mock_user_snap
+        mock_user_snap.exists = True
+        mock_user_snap.to_dict.return_value = {"github_username": "brian"}
+
+        result = sync_user_periodic("user_no_token", mock_db)
+        self.assertEqual(result["status"], "skipped")
+        self.assertEqual(result["reason"], "no_github_token")
+
+    @patch("github_sync.dispatch_task")
+    def test_enqueue_user_periodic_sync(self, mock_dispatch):
+        mock_db = MagicMock()
+        enqueue_user_periodic_sync(uid="user_enq_1", db=mock_db)
+        mock_dispatch.assert_called_once()
+        self.assertEqual(mock_dispatch.call_args[1]["queue_name"], "sync_user_periodic_task")
+        self.assertEqual(mock_dispatch.call_args[1]["task_data"], {"uid": "user_enq_1"})
 
 
 class TestEnqueueIssuePageSync(unittest.TestCase):

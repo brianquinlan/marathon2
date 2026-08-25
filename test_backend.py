@@ -231,19 +231,6 @@ class TestTaskQueueSyncHandlers(unittest.TestCase):
         mock_enqueue_issue.assert_called_once()
 
 
-class TestScheduledFunctions(unittest.TestCase):
-    @patch("main.sync_all_users_closed_issues")
-    @patch("main.db")
-    def test_scheduled_sync_closed_issues_execution(self, mock_db, mock_sync_all):
-        mock_sync_all.return_value = {"users_processed": 2, "total_closed_tasks_removed": 3}
-
-        handler = get_callable_handler(main.scheduled_sync_closed_issues)
-        mock_event = MagicMock()
-
-        handler(mock_event)
-        mock_sync_all.assert_called_once_with(db=mock_db)
-
-
 class TestJinjaMainPageRendering(unittest.TestCase):
     def test_render_main_page_unauthenticated(self):
         handler = get_callable_handler(main.render_main_page)
@@ -704,6 +691,53 @@ class TestFirestoreTaskTrigger(unittest.TestCase):
 
         handler(mock_event)
         mock_enqueue_ranking.assert_not_called()
+
+
+class TestPeriodicGithubSyncSchedulerAndWorker(unittest.TestCase):
+    @patch("main.sync_user_periodic")
+    @patch("main.db")
+    def test_sync_user_periodic_task_worker(self, mock_db, mock_sync_fn):
+        handler = get_callable_handler(main.sync_user_periodic_task)
+
+        mock_req = MagicMock(spec=tasks_fn.CallableRequest)
+        mock_req.data = {"uid": "user_periodic_worker_1"}
+
+        result = handler(mock_req)
+        self.assertIsNone(result)
+        mock_sync_fn.assert_called_once_with(uid="user_periodic_worker_1", db=mock_db)
+
+    def test_sync_user_periodic_task_worker_missing_uid_raises_error(self):
+        handler = get_callable_handler(main.sync_user_periodic_task)
+
+        mock_req = MagicMock(spec=tasks_fn.CallableRequest)
+        mock_req.data = {}
+
+        with self.assertRaises(tasks_fn.HttpsError) as ctx:
+            handler(mock_req)
+        self.assertEqual(ctx.exception.code, tasks_fn.FunctionsErrorCode.INVALID_ARGUMENT)
+
+    @patch("main.enqueue_user_periodic_sync")
+    @patch("main.db")
+    def test_periodic_github_sync_scheduler_enqueues_users_with_token(self, mock_db, mock_enqueue_sync):
+        handler = get_callable_handler(main.periodic_github_sync_scheduler)
+
+        mock_users_col = MagicMock()
+        mock_db.collection.return_value = mock_users_col
+
+        user_with_token = MagicMock()
+        user_with_token.id = "user_with_tok"
+        user_with_token.to_dict.return_value = {"github_access_token": "ghp_tok_123"}
+
+        user_no_token = MagicMock()
+        user_no_token.id = "user_no_tok"
+        user_no_token.to_dict.return_value = {"github_username": "bob"}
+
+        mock_users_col.stream.return_value = [user_with_token, user_no_token]
+
+        mock_event = MagicMock()
+        handler(mock_event)
+
+        mock_enqueue_sync.assert_called_once_with(uid="user_with_tok", db=mock_db)
 
 
 if __name__ == "__main__":

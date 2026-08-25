@@ -19,7 +19,12 @@ from google.cloud import firestore
 from google.cloud.firestore import SERVER_TIMESTAMP
 
 from auth_utils import extract_provider_info, fetch_full_user_auth_record, verify_bearer_token
-from github_sync import enqueue_issue_page_sync, start_user_github_sync, sync_all_users_closed_issues
+from github_sync import (
+    enqueue_issue_page_sync,
+    enqueue_user_periodic_sync,
+    start_user_github_sync,
+    sync_user_periodic,
+)
 from task import (
     cleanup_repo_tasks,
     delete_all_user_tasks,
@@ -683,17 +688,40 @@ def user_api(req: https_fn.Request) -> Response:
 
 
 # ============================================================================
-# Scheduled Functions: Closed Issues Sync & Task Cleanup (Option A)
+# Scheduled Functions & Task Queue Workers: 20-Minute Periodic User Sync
 # ============================================================================
 
 
-@scheduler_fn.on_schedule(schedule="every 5 minutes", retry_count=1)
-def scheduled_sync_closed_issues(event: scheduler_fn.ScheduledEvent) -> None:
+@tasks_fn.on_task_dispatched()
+def sync_user_periodic_task(req: tasks_fn.CallableRequest) -> None:
     """
-    Scheduled function that runs every 5 minutes to detect closed GitHub issues
-    and remove them from users' task lists in Firestore.
+    Task Queue worker that runs the 20-minute periodic sync for a single user,
+    purging closed tasks and syncing updated/new open issues.
     """
-    sync_all_users_closed_issues(db=db)
+    payload = req.data if isinstance(req.data, dict) else {}
+    uid = payload.get("uid")
+    if not uid:
+        raise tasks_fn.HttpsError(
+            code=tasks_fn.FunctionsErrorCode.INVALID_ARGUMENT,
+            message="Periodic user sync task requires 'uid'.",
+        )
+    sync_user_periodic(uid=str(uid), db=db)
+
+
+@scheduler_fn.on_schedule(schedule="every 20 minutes", retry_count=1)
+def periodic_github_sync_scheduler(event: scheduler_fn.ScheduledEvent) -> None:
+    """
+    Scheduled Cloud Function that runs every 20 minutes.
+    Sweeps all users in Firestore and enqueues individual user periodic sync jobs
+    for users with an active GitHub access token.
+    """
+    users_col = db.collection("users")
+    users_docs = users_col.stream()
+
+    for doc_snap in users_docs:
+        raw_user_dict = doc_snap.to_dict() or {}
+        if raw_user_dict.get("github_access_token"):
+            enqueue_user_periodic_sync(uid=doc_snap.id, db=db)
 
 
 # ============================================================================

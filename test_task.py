@@ -25,6 +25,7 @@ from task import (
     Task,
     cleanup_repo_tasks,
     delete_all_user_tasks,
+    delete_task_for_issue,
     enqueue_task_ranking,
     ensure_task_for_issue,
     force_rerank_tasks,
@@ -526,6 +527,28 @@ class TestTaskLifecycleAndSourceTracking(unittest.TestCase):
         self.assertEqual(deleted_count, 2)
         doc1.reference.delete.assert_called_once()
         doc2.reference.delete.assert_called_once()
+
+    def test_delete_task_for_issue(self):
+        mock_db = MagicMock()
+        mock_task_ref = MagicMock()
+        mock_doc_snap = MagicMock()
+        mock_db.collection.return_value.document.return_value.collection.return_value.document.return_value = (
+            mock_task_ref
+        )
+        mock_task_ref.get.return_value = mock_doc_snap
+
+        # Exists -> deletes and returns True
+        mock_doc_snap.exists = True
+        res = delete_task_for_issue("user_1", "org_repo_1", mock_db)
+        self.assertTrue(res)
+        mock_task_ref.delete.assert_called_once()
+
+        # Does not exist -> returns False
+        mock_doc_snap.exists = False
+        mock_task_ref.delete.reset_mock()
+        res = delete_task_for_issue("user_1", "org_repo_2", mock_db)
+        self.assertFalse(res)
+        mock_task_ref.delete.assert_not_called()
 
     @patch("task.enqueue_task_ranking")
     def test_mark_all_tasks_for_reranking(self, mock_enqueue):

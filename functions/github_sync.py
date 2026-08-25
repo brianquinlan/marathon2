@@ -21,7 +21,7 @@ from google.cloud import firestore
 from queue_utils import dispatch_task
 
 from genai_ranker import IssuePayload
-from task import ensure_task_for_issue
+from task import delete_task_for_issue, ensure_task_for_issue
 from user import User
 
 
@@ -134,9 +134,9 @@ def process_and_save_issue_page(
     source: str | None = None,
 ) -> None:
     """
-    Processes a page of GitHub issues for a given user and directly creates or updates
-    the associated Task document in Firestore (users/{uid}/tasks/task_{doc_id}).
-    Does not store intermediate issue documents in Firestore.
+    Processes a page of GitHub issues for a given user:
+    - If the issue is closed: deletes the corresponding Task document from Firestore.
+    - If the issue is open: creates or updates the associated Task document (users/{uid}/tasks/task_{doc_id}).
     """
     for issue in issues:
         issue_number = issue.number
@@ -153,6 +153,11 @@ def process_and_save_issue_page(
         clean_owner = re.sub(r"[^a-zA-Z0-9_-]", "_", str(owner))
         clean_repo = re.sub(r"[^a-zA-Z0-9_-]", "_", str(repo))
         doc_id = f"{clean_owner}_{clean_repo}_{issue_number}"
+
+        # If the issue is closed, delete the task from Firestore
+        if getattr(issue, "state", "open") == "closed":
+            delete_task_for_issue(uid=uid, issue_id=doc_id, db=db)
+            continue
 
         issue_payload: dict[str, object] = {
             "title": issue.title,
@@ -301,13 +306,17 @@ def fetch_github_user_login(access_token: str) -> str | None:
 # ============================================================================
 
 
-def start_user_github_sync(user: User, db: firestore.Client, state: str = "open") -> dict[str, object]:
+def start_user_github_sync(user: User, db: firestore.Client, state: str | None = None) -> dict[str, object]:
     """
     Kicks off asynchronous, chained pagination tasks for all user issues:
     1. Assigned issues (filter=assigned)
     2. Mentioned issues (filter=mentioned)
     3. Created issues (filter=created)
     4. Repositories in user.monitored_repos
+
+    If state is None (default):
+    - If since is None (initial sync): state="open" to avoid paginating historical closed issues.
+    - If since is not None (incremental sync): state="all" to capture both open updates and newly closed issues.
     """
     if not user.github_access_token:
         raise ValueError(
@@ -338,11 +347,12 @@ def start_user_github_sync(user: User, db: firestore.Client, state: str = "open"
         ("created", user.last_created_sync),
     ]
     for filter_name, filter_since in filter_timestamps:
+        filter_state = state if state is not None else ("all" if filter_since is not None else "open")
         enqueue_issue_page_sync(
             uid=user_uid,
             db=db,
             filter_name=filter_name,
-            state=state,
+            state=filter_state,
             since=filter_since,
             page=0,
             per_page=100,
@@ -356,11 +366,12 @@ def start_user_github_sync(user: User, db: firestore.Client, state: str = "open"
             continue
 
         owner_part, repo_part = repo_clean.split("/", 1)
+        repo_state = state if state is not None else ("all" if repo_since is not None else "open")
         enqueue_issue_page_sync(
             uid=user_uid,
             db=db,
             repo_full_name=repo_clean,
-            state=state,
+            state=repo_state,
             since=repo_since,
             page=0,
             per_page=100,
@@ -398,116 +409,41 @@ def start_user_github_sync(user: User, db: firestore.Client, state: str = "open"
 
 
 # ============================================================================
-# Scheduled Closed Issues Sync & Task Cleanup
+# Periodic User Sync
 # ============================================================================
 
 
-def sync_closed_issues_for_user(user: User, db: firestore.Client, client: Github | None = None) -> None:
+def sync_user_periodic(uid: str, db: firestore.Client) -> dict[str, object]:
     """
-    Queries GitHub for issues closed since the last sync via PyGithub
-    and deletes the corresponding Task document from users/{uid}/tasks.
+    Executes a periodic sync cycle for a single user:
+    Syncs open and closed issue updates (state="all") across assigned, mentioned,
+    created, and monitored repositories, updating tasks and timestamps.
     """
-    user_uid = user.uid or "unknown"
+    user_ref = db.collection("users").document(uid)
+    doc_snap = user_ref.get()
+    if not doc_snap.exists:
+        return {"status": "skipped", "reason": "user_not_found"}
+
+    raw_user_dict = doc_snap.to_dict() or {}
+    user = User.model_validate({**raw_user_dict, "uid": uid})
     if not user.github_access_token:
-        return
+        return {"status": "skipped", "reason": "no_github_token"}
 
-    g = client or get_github_client(user.github_access_token)
-    closed_items: list[tuple[PyghIssue, str | None, str | None]] = []
+    sync_result = start_user_github_sync(user=user, db=db)
 
-    # 1. Query user-level closed issue filters with individual timestamps
-    filter_timestamps: list[tuple[str, datetime | None]] = [
-        ("assigned", user.last_assigned_sync),
-        ("mentioned", user.last_mentioned_sync),
-        ("created", user.last_created_sync),
-    ]
-    for filter_name, filter_since in filter_timestamps:
-        items, _ = fetch_single_issue_page(
-            client=g,
-            filter_name=filter_name,
-            state="closed",
-            since=filter_since,
-            page=0,
-            per_page=100,
-        )
-        for it in items:
-            closed_items.append((it, None, None))
+    return {
+        "status": "success",
+        "uid": uid,
+        "sync_result": sync_result,
+    }
 
-    # 2. Query monitored repositories for closed issues with individual timestamps
-    for repo_path, repo_since in user.monitored_repos.items():
-        repo_clean = repo_path.strip().strip("/")
-        if not repo_clean or "/" not in repo_clean:
-            continue
 
-        owner_part, repo_part = repo_clean.split("/", 1)
-        items, _ = fetch_single_issue_page(
-            client=g,
-            repo_full_name=repo_clean,
-            state="closed",
-            since=repo_since,
-            page=0,
-            per_page=100,
-        )
-        for it in items:
-            closed_items.append((it, owner_part, repo_part))
-
-    # Process and remove closed issues from tasks
-    tasks_col = db.collection("users").document(user_uid).collection("tasks")
-    seen_doc_ids: set[str] = set()
-
-    for item, owner_fallback, repo_fallback in closed_items:
-        owner = (
-            item.repository.owner.login if item.repository and item.repository.owner else (owner_fallback or "unknown")
-        )
-        repo = item.repository.name if item.repository else (repo_fallback or "unknown")
-
-        issue_number = item.number
-        clean_owner = re.sub(r"[^a-zA-Z0-9_-]", "_", str(owner))
-        clean_repo = re.sub(r"[^a-zA-Z0-9_-]", "_", str(repo))
-        doc_id = f"{clean_owner}_{clean_repo}_{issue_number}"
-
-        if doc_id in seen_doc_ids:
-            continue
-        seen_doc_ids.add(doc_id)
-
-        # Delete corresponding task if it exists
-        task_doc_id = f"task_{doc_id}"
-        task_ref = tasks_col.document(task_doc_id)
-        task_snap = task_ref.get()
-        if task_snap.exists:
-            task_ref.delete()
-
-    # Update sync timestamps
-    now = datetime.now(timezone.utc)
-    user.last_assigned_sync = now
-    user.last_mentioned_sync = now
-    user.last_created_sync = now
-    for repo_path in list(user.monitored_repos.keys()):
-        user.monitored_repos[repo_path] = now
-
-    db.collection("users").document(user_uid).set(
-        {
-            "last_assigned_sync": now,
-            "last_mentioned_sync": now,
-            "last_created_sync": now,
-            "monitored_repos": user.monitored_repos,
-            "updated_at": firestore.SERVER_TIMESTAMP,
-        },
-        merge=True,
+def enqueue_user_periodic_sync(uid: str, db: firestore.Client) -> None:
+    """
+    Enqueues a task to run the periodic sync for a single user using the task queue abstraction.
+    """
+    dispatch_task(
+        queue_name="sync_user_periodic_task",
+        task_data={"uid": uid},
+        worker_fn=lambda: sync_user_periodic(uid=uid, db=db),
     )
-
-
-def sync_all_users_closed_issues(db: firestore.Client) -> None:
-    """
-    Sweeps through all users in Firestore and removes closed issues from their task list.
-    """
-    users_col = db.collection("users")
-    users_docs = users_col.stream()
-
-    for doc_snap in users_docs:
-        raw_user_dict = doc_snap.to_dict() or {}
-        user = User.model_validate({**raw_user_dict, "uid": doc_snap.id})
-        if user.github_access_token:
-            try:
-                sync_closed_issues_for_user(user=user, db=db)
-            except Exception:
-                pass
