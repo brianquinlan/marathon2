@@ -309,6 +309,67 @@ class TestJinjaMainPageRendering(unittest.TestCase):
         idx_lower = html.find("Lower Priority Task")
         self.assertTrue(idx_top < idx_lower, "Top priority task should appear before lower priority task")
 
+    @patch("main.start_user_github_sync")
+    @patch("main.auth.verify_id_token")
+    @patch("main.db")
+    def test_render_main_page_post_sync(self, mock_db, mock_verify, mock_sync):
+        mock_verify.return_value = {"uid": "user_sync_post", "email": "sync@example.com"}
+        mock_user_doc = MagicMock()
+        mock_user_snap = MagicMock()
+        mock_user_snap.exists = True
+        mock_user_snap.to_dict.return_value = {
+            "github_access_token": "ghp_valid_token",
+            "monitored_repos": {},
+        }
+        mock_user_doc.get.return_value = mock_user_snap
+        mock_tasks_col = MagicMock()
+        mock_tasks_col.stream.return_value = []
+
+        mock_db.collection.return_value.document.return_value = mock_user_doc
+        mock_user_doc.collection.return_value = mock_tasks_col
+
+        handler = get_callable_handler(main.render_main_page)
+        mock_req = MagicMock()
+        mock_req.method = "POST"
+        mock_req.cookies = {"__session": "mock_id_token"}
+        mock_req.args = {}
+        mock_req.headers = {}
+        mock_req.form = {"action": "sync"}
+
+        resp = handler(mock_req)
+        assert isinstance(resp, Response)
+        self.assertEqual(resp.status_code, 200)
+        mock_sync.assert_called_once()
+
+    @patch("main.force_rerank_tasks")
+    @patch("main.auth.verify_id_token")
+    @patch("main.db")
+    def test_render_main_page_post_rerank(self, mock_db, mock_verify, mock_rerank):
+        mock_verify.return_value = {"uid": "user_rerank_post", "email": "rerank@example.com"}
+        mock_user_doc = MagicMock()
+        mock_user_snap = MagicMock()
+        mock_user_snap.exists = True
+        mock_user_snap.to_dict.return_value = {"email": "rerank@example.com"}
+        mock_user_doc.get.return_value = mock_user_snap
+        mock_tasks_col = MagicMock()
+        mock_tasks_col.stream.return_value = []
+
+        mock_db.collection.return_value.document.return_value = mock_user_doc
+        mock_user_doc.collection.return_value = mock_tasks_col
+
+        handler = get_callable_handler(main.render_main_page)
+        mock_req = MagicMock()
+        mock_req.method = "POST"
+        mock_req.cookies = {"__session": "mock_id_token"}
+        mock_req.args = {}
+        mock_req.headers = {}
+        mock_req.form = {"action": "rerank"}
+
+        resp = handler(mock_req)
+        assert isinstance(resp, Response)
+        self.assertEqual(resp.status_code, 200)
+        mock_rerank.assert_called_once_with(uid="user_rerank_post", db=mock_db)
+
 
 class TestJinjaSettingsPageCRUD(unittest.TestCase):
     def test_render_settings_page_unauthenticated_redirects(self):

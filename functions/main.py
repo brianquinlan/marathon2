@@ -90,7 +90,13 @@ def render_main_page(req: https_fn.Request) -> Response:
         user_data = {"uid": uid, "email": decoded_token.get("email"), "display_name": decoded_token.get("name")}
 
     if req.method == "POST":
-        force_rerank_tasks(uid=uid, db=db)
+        action = req.form.get("action") if req.form else None
+        if action == "sync":
+            user_model = User.model_validate({**user_data, "uid": uid})
+            if user_model.github_access_token:
+                start_user_github_sync(user=user_model, db=db)
+        else:
+            force_rerank_tasks(uid=uid, db=db)
 
     # Fetch tasks from users/{uid}/tasks
     tasks_col = db.collection("users").document(uid).collection("tasks")
