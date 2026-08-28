@@ -319,9 +319,7 @@ def start_user_github_sync(user: User, db: firestore.Client, state: str | None =
     - If since is not None (incremental sync): state="all" to capture both open updates and newly closed issues.
     """
     if not user.github_access_token:
-        raise ValueError(
-            f"User {user.uid or user.display_name or 'unknown'} does not have a github_access_token configured."
-        )
+        raise ValueError(f"User {user.uid or 'unknown'} does not have a github_access_token configured.")
 
     user_uid = user.uid or "unknown"
 

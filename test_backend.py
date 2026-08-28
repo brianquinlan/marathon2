@@ -36,22 +36,17 @@ class TestUserModel(unittest.TestCase):
         user = User(
             github_access_token="gho_test_token_123",
             github_username="brianquinlan",
+            gemini_api_key="AIzaSyTestKey123",
             last_assigned_sync=dt_sync,
             monitored_repos={"brianquinlan/marathon2": None, "google/jax": None},
             uid="user_abc_123",
-            email="developer@example.com",
-            email_verified=True,
-            display_name="Dev Example",
-            photo_url="https://avatar.example.com/1",
-            primary_provider="github.com",
-            github_id="12345678",
         )
         self.assertEqual(user.github_access_token, "gho_test_token_123")
         self.assertEqual(user.github_username, "brianquinlan")
+        self.assertEqual(user.gemini_api_key, "AIzaSyTestKey123")
         self.assertEqual(user.last_assigned_sync, dt_sync)
         self.assertEqual(user.monitored_repos, {"brianquinlan/marathon2": None, "google/jax": None})
-        self.assertEqual(user.primary_provider, "github.com")
-        self.assertTrue(user.email_verified)
+        self.assertEqual(user.uid, "user_abc_123")
 
         # Test Pydantic JSON serialization
         json_str = user.model_dump_json()
@@ -66,18 +61,16 @@ class TestUserModel(unittest.TestCase):
         dt_sync = datetime(2026, 8, 22, 10, 30, tzinfo=timezone.utc)
         user = User(
             uid="user_999",
-            email="google@domain.com",
             github_access_token="gho_xyz",
             github_username="octocat",
+            gemini_api_key="AIzaSyOctoKey",
             last_assigned_sync=dt_sync,
             monitored_repos={"owner/repo1": None},
-            custom_data={"role": "maintainer"},
         )
         data = user.model_dump()
         self.assertEqual(data["uid"], "user_999")
         self.assertEqual(data["github_access_token"], "gho_xyz")
         self.assertEqual(data["monitored_repos"], {"owner/repo1": None})
-        self.assertEqual(data["custom_data"]["role"], "maintainer")
 
         # Reconstruct from dict
         reconstructed = User.model_validate(data)
@@ -85,23 +78,19 @@ class TestUserModel(unittest.TestCase):
         self.assertEqual(reconstructed.github_access_token, "gho_xyz")
         self.assertEqual(reconstructed.monitored_repos, {"owner/repo1": None})
 
-    def test_user_timestamps_handling(self):
-        from datetime import datetime, timezone
-
-        now = datetime(2026, 8, 23, 10, 0, 0, tzinfo=timezone.utc)
+    def test_user_extra_fields_gracefully_ignored(self):
+        # Ensure extra fields from legacy Firestore documents do not cause validation errors
         user = User.model_validate(
             {
-                "uid": "user_time_1",
-                "created_at": now.isoformat(),
-                "updated_at": "2026-08-23T10:05:00Z",  # Pydantic string coercion
+                "uid": "user_legacy",
+                "email": "dev@legacy.com",
+                "custom_data": {"legacy_key": "val"},
+                "github_access_token": "ghp_tok",
             }
         )
-        self.assertEqual(user.created_at, now)
-        self.assertIsInstance(user.updated_at, datetime)
-        self.assertEqual(user.updated_at, datetime(2026, 8, 23, 10, 5, 0, tzinfo=timezone.utc))
-
-        json_str = user.model_dump_json()
-        self.assertIn('"created_at":"2026-08-23T10:00:00Z"', json_str.replace("+00:00", "Z"))
+        self.assertEqual(user.uid, "user_legacy")
+        self.assertEqual(user.github_access_token, "ghp_tok")
+        self.assertFalse(hasattr(user, "email"))
 
 
 class TestCallableFunctionLogic(unittest.TestCase):
