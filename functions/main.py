@@ -15,7 +15,7 @@ from flask import Response
 from google.cloud import firestore
 from google.cloud.firestore import SERVER_TIMESTAMP
 
-from auth_utils import extract_provider_info, fetch_full_user_auth_record, verify_bearer_token
+from auth_utils import extract_provider_info, verify_bearer_token
 from dev import render_main_page, render_settings_page
 from github_sync import (
     enqueue_issue_page_sync,
@@ -44,111 +44,6 @@ __all__ = [
     "render_main_page",
     "render_settings_page",
 ]
-
-
-# ============================================================================
-# User Profile Callable Functions
-# ============================================================================
-
-
-@https_fn.on_call(cors=options.CorsOptions(cors_origins="*", cors_methods=["get", "post", "options"]))
-def get_user_info(req: https_fn.CallableRequest) -> dict[str, object]:
-    """
-    Retrieves the authenticated user's User document from Firestore.
-    """
-    if not req.auth or not req.auth.uid:
-        raise https_fn.HttpsError(
-            code=https_fn.FunctionsErrorCode.UNAUTHENTICATED,
-            message="User must be authenticated to retrieve information.",
-        )
-
-    uid = str(req.auth.uid)
-    token = req.auth.token
-    provider_info = extract_provider_info(token)
-
-    user_ref = db.collection("users").document(uid)
-    doc_snap = user_ref.get()
-
-    if not doc_snap.exists:
-        user = User.from_auth_token(
-            token_dict=token,
-            provider_info=provider_info,
-        )
-        user_ref.set({**user.model_dump(), "updated_at": SERVER_TIMESTAMP})
-    else:
-        raw_user_dict = doc_snap.to_dict() or {}
-        user = User.model_validate({**raw_user_dict, "uid": uid})
-
-    return {
-        "status": "success",
-        "user": user.model_dump(mode="json"),
-        "auth_provider": provider_info,
-    }
-
-
-@https_fn.on_call(cors=options.CorsOptions(cors_origins="*", cors_methods=["get", "post", "options"]))
-def sync_auth_profile(req: https_fn.CallableRequest) -> dict[str, object]:
-    """
-    Synchronizes Firebase Auth profile data into Firestore.
-    """
-    if not req.auth or not req.auth.uid:
-        raise https_fn.HttpsError(
-            code=https_fn.FunctionsErrorCode.UNAUTHENTICATED, message="User must be authenticated to sync profile."
-        )
-
-    uid = str(req.auth.uid)
-    full_auth_record = fetch_full_user_auth_record(uid)
-    provider_info = extract_provider_info(req.auth.token)
-
-    user_ref = db.collection("users").document(uid)
-    doc_snap = user_ref.get()
-
-    if doc_snap.exists:
-        raw_user_dict = doc_snap.to_dict() or {}
-        user = User.model_validate({**raw_user_dict, "uid": uid})
-    else:
-        user = User(uid=uid)
-
-    user.email = str(full_auth_record["email"]) if full_auth_record.get("email") else None
-    user.email_verified = bool(full_auth_record.get("email_verified", False))
-    user.display_name = str(full_auth_record["display_name"]) if full_auth_record.get("display_name") else None
-    user.photo_url = str(full_auth_record["photo_url"]) if full_auth_record.get("photo_url") else None
-    user.primary_provider = str(provider_info["primary_provider"]) if provider_info.get("primary_provider") else None
-    user.google_id = str(provider_info["google_id"]) if provider_info.get("google_id") else None
-    user.github_id = str(provider_info["github_id"]) if provider_info.get("github_id") else None
-    raw_linked = provider_info.get("linked_providers")
-    user.linked_providers = [str(x) for x in raw_linked] if isinstance(raw_linked, list) else []
-
-    user_ref.set({**user.model_dump(), "updated_at": SERVER_TIMESTAMP}, merge=True)
-
-    return {
-        "status": "success",
-        "message": "Auth profile synced successfully.",
-        "user": user.model_dump(mode="json"),
-        "auth_record": full_auth_record,
-    }
-
-
-@https_fn.on_call(cors=options.CorsOptions(cors_origins="*", cors_methods=["get", "post", "options"]))
-def delete_user_info(req: https_fn.CallableRequest) -> dict[str, object]:
-    """
-    Deletes the user's User document from Firestore.
-    """
-    if not req.auth:
-        raise https_fn.HttpsError(
-            code=https_fn.FunctionsErrorCode.UNAUTHENTICATED,
-            message="User must be authenticated to delete associated data.",
-        )
-
-    uid = req.auth.uid
-    user_ref = db.collection("users").document(uid)
-    doc_snap = user_ref.get()
-
-    if doc_snap.exists:
-        user_ref.delete()
-        return {"status": "success", "message": f"User document for UID {uid} has been deleted."}
-    else:
-        return {"status": "not_found", "message": "No User document found for this user."}
 
 
 # ============================================================================
