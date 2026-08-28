@@ -47,55 +47,6 @@ __all__ = [
 
 
 # ============================================================================
-# GitHub Issues Trigger & Retrieval
-# ============================================================================
-
-
-@https_fn.on_call(cors=options.CorsOptions(cors_origins="*", cors_methods=["get", "post", "options"]))
-def sync_github_issues(req: https_fn.CallableRequest) -> dict[str, object]:
-    """
-    Kicks off asynchronous GitHub issue synchronization in the background.
-    Dispatches initial pagination tasks for assigned, mentioned, created, and monitored repo issues.
-    """
-    if not req.auth:
-        raise https_fn.HttpsError(
-            code=https_fn.FunctionsErrorCode.UNAUTHENTICATED,
-            message="User must be authenticated to sync GitHub issues.",
-        )
-
-    uid = req.auth.uid
-    user_ref = db.collection("users").document(uid)
-    doc_snap = user_ref.get()
-
-    if not doc_snap.exists:
-        raise https_fn.HttpsError(
-            code=https_fn.FunctionsErrorCode.NOT_FOUND,
-            message="User document not found in Firestore. Please configure your GitHub access token first.",
-        )
-
-    raw_user_dict = doc_snap.to_dict() or {}
-    user = User.model_validate({**raw_user_dict, "uid": uid})
-
-    if not user.github_access_token:
-        raise https_fn.HttpsError(
-            code=https_fn.FunctionsErrorCode.FAILED_PRECONDITION,
-            message="User does not have a github_access_token configured.",
-        )
-
-    payload: dict[str, object] = req.data if isinstance(req.data, dict) else {}
-    raw_state = payload.get("state")
-    state = str(raw_state) if raw_state is not None else "open"
-
-    try:
-        result = start_user_github_sync(user=user, db=db, state=state)
-        return result
-    except Exception as e:
-        raise https_fn.HttpsError(
-            code=https_fn.FunctionsErrorCode.INTERNAL, message=f"Failed to start GitHub sync: {e!s}"
-        ) from e
-
-
-# ============================================================================
 # Firebase Task Queue Functions: Issue Pagination
 # ============================================================================
 

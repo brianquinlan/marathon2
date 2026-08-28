@@ -127,30 +127,6 @@ class TestAuthProviderExtraction(unittest.TestCase):
 
 
 class TestCallableFunctionLogic(unittest.TestCase):
-    @patch("main.start_user_github_sync")
-    @patch("main.db")
-    def test_sync_github_issues_callable(self, mock_db, mock_sync_fn):
-        handler = get_callable_handler(main.sync_github_issues)
-
-        mock_doc_ref = MagicMock()
-        mock_doc_snap = MagicMock()
-        mock_doc_snap.exists = True
-        mock_doc_snap.to_dict.return_value = {"uid": "user_sync_001", "github_access_token": "gho_valid_token"}
-        mock_doc_ref.get.return_value = mock_doc_snap
-        mock_db.collection.return_value.document.return_value = mock_doc_ref
-
-        mock_sync_fn.return_value = {"status": "enqueued", "uid": "user_sync_001", "initial_queues_count": 4}
-
-        mock_req = MagicMock(spec=https_fn.CallableRequest)
-        mock_req.auth = MagicMock()
-        mock_req.auth.uid = "user_sync_001"
-        mock_req.data = {"state": "all"}
-
-        result = handler(mock_req)
-        assert isinstance(result, dict)
-        self.assertEqual(result["status"], "enqueued")
-        self.assertEqual(result["initial_queues_count"], 4)
-
     @patch("main.force_rerank_tasks")
     @patch("main.db")
     def test_force_rerank_all_tasks_callable(self, mock_db, mock_force_fn):
