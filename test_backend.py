@@ -11,6 +11,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "functions"))
 
 from firebase_functions import https_fn, tasks_fn
 
+import dev
 import main
 from auth_utils import extract_provider_info
 from user import User
@@ -126,40 +127,6 @@ class TestAuthProviderExtraction(unittest.TestCase):
 
 
 class TestCallableFunctionLogic(unittest.TestCase):
-    @patch("main.db")
-    def test_associate_user_info_with_monitored_repos(self, mock_db):
-        handler = get_callable_handler(main.associate_user_info)
-
-        mock_doc_ref = MagicMock()
-        mock_doc_snap = MagicMock()
-        mock_doc_snap.exists = False
-        mock_doc_ref.get.return_value = mock_doc_snap
-        mock_db.collection.return_value.document.return_value = mock_doc_ref
-
-        mock_req = MagicMock(spec=https_fn.CallableRequest)
-        mock_req.auth = MagicMock()
-        mock_req.auth.uid = "user_github_001"
-        mock_req.auth.token = {
-            "email": "user@github.com",
-            "name": "GitHub Dev",
-            "firebase": {"sign_in_provider": "github.com", "identities": {"github.com": ["12345"]}},
-        }
-        mock_req.data = {
-            "github_access_token": "gho_sample_token_xyz",
-            "monitored_repos": {"brianquinlan/marathon2": None, "org/awesome-project": None},
-        }
-
-        result = handler(mock_req)
-        assert isinstance(result, dict)
-        self.assertEqual(result["status"], "success")
-        user_res = result.get("user")
-        assert isinstance(user_res, dict)
-        self.assertEqual(
-            user_res["monitored_repos"],
-            {"brianquinlan/marathon2": None, "org/awesome-project": None},
-        )
-        mock_doc_ref.set.assert_called_once()
-
     @patch("main.start_user_github_sync")
     @patch("main.db")
     def test_sync_github_issues_callable(self, mock_db, mock_sync_fn):
@@ -233,7 +200,7 @@ class TestTaskQueueSyncHandlers(unittest.TestCase):
 
 class TestJinjaMainPageRendering(unittest.TestCase):
     def test_render_main_page_unauthenticated(self):
-        handler = get_callable_handler(main.render_main_page)
+        handler = get_callable_handler(dev.render_main_page)
         mock_req = MagicMock()
         mock_req.method = "GET"
         mock_req.cookies = {}
@@ -248,8 +215,8 @@ class TestJinjaMainPageRendering(unittest.TestCase):
         self.assertIn("Login", html)
         self.assertIn("Sign in with Google", html)
 
-    @patch("main.auth.verify_id_token")
-    @patch("main.db")
+    @patch("dev.auth.verify_id_token")
+    @patch("dev.db")
     def test_render_main_page_authenticated_renders_ranked_tasks(self, mock_db, mock_verify):
         mock_verify.return_value = {"uid": "user_jinja_1", "email": "tester@example.com", "name": "Tester Dev"}
 
@@ -281,7 +248,7 @@ class TestJinjaMainPageRendering(unittest.TestCase):
         mock_db.collection.return_value.document.return_value = mock_user_doc
         mock_user_doc.collection.return_value = mock_tasks_col
 
-        handler = get_callable_handler(main.render_main_page)
+        handler = get_callable_handler(dev.render_main_page)
         mock_req = MagicMock()
         mock_req.method = "GET"
         mock_req.cookies = {"__session": "mock_id_token_123"}
@@ -309,9 +276,9 @@ class TestJinjaMainPageRendering(unittest.TestCase):
         idx_lower = html.find("Lower Priority Task")
         self.assertTrue(idx_top < idx_lower, "Top priority task should appear before lower priority task")
 
-    @patch("main.start_user_github_sync")
-    @patch("main.auth.verify_id_token")
-    @patch("main.db")
+    @patch("dev.start_user_github_sync")
+    @patch("dev.auth.verify_id_token")
+    @patch("dev.db")
     def test_render_main_page_post_sync(self, mock_db, mock_verify, mock_sync):
         mock_verify.return_value = {"uid": "user_sync_post", "email": "sync@example.com"}
         mock_user_doc = MagicMock()
@@ -328,7 +295,7 @@ class TestJinjaMainPageRendering(unittest.TestCase):
         mock_db.collection.return_value.document.return_value = mock_user_doc
         mock_user_doc.collection.return_value = mock_tasks_col
 
-        handler = get_callable_handler(main.render_main_page)
+        handler = get_callable_handler(dev.render_main_page)
         mock_req = MagicMock()
         mock_req.method = "POST"
         mock_req.cookies = {"__session": "mock_id_token"}
@@ -341,9 +308,9 @@ class TestJinjaMainPageRendering(unittest.TestCase):
         self.assertEqual(resp.status_code, 200)
         mock_sync.assert_called_once()
 
-    @patch("main.force_rerank_tasks")
-    @patch("main.auth.verify_id_token")
-    @patch("main.db")
+    @patch("dev.force_rerank_tasks")
+    @patch("dev.auth.verify_id_token")
+    @patch("dev.db")
     def test_render_main_page_post_rerank(self, mock_db, mock_verify, mock_rerank):
         mock_verify.return_value = {"uid": "user_rerank_post", "email": "rerank@example.com"}
         mock_user_doc = MagicMock()
@@ -357,7 +324,7 @@ class TestJinjaMainPageRendering(unittest.TestCase):
         mock_db.collection.return_value.document.return_value = mock_user_doc
         mock_user_doc.collection.return_value = mock_tasks_col
 
-        handler = get_callable_handler(main.render_main_page)
+        handler = get_callable_handler(dev.render_main_page)
         mock_req = MagicMock()
         mock_req.method = "POST"
         mock_req.cookies = {"__session": "mock_id_token"}
@@ -373,7 +340,7 @@ class TestJinjaMainPageRendering(unittest.TestCase):
 
 class TestJinjaSettingsPageCRUD(unittest.TestCase):
     def test_render_settings_page_unauthenticated_redirects(self):
-        handler = get_callable_handler(main.render_settings_page)
+        handler = get_callable_handler(dev.render_settings_page)
         mock_req = MagicMock()
         mock_req.method = "GET"
         mock_req.cookies = {}
@@ -385,8 +352,8 @@ class TestJinjaSettingsPageCRUD(unittest.TestCase):
         self.assertEqual(resp.status_code, 302)
         self.assertEqual(resp.headers.get("Location"), "/")
 
-    @patch("main.auth.verify_id_token")
-    @patch("main.db")
+    @patch("dev.auth.verify_id_token")
+    @patch("dev.db")
     def test_render_settings_page_get_authenticated(self, mock_db, mock_verify):
         mock_verify.return_value = {"uid": "user_settings_1", "email": "dev@test.com"}
 
@@ -401,7 +368,7 @@ class TestJinjaSettingsPageCRUD(unittest.TestCase):
         mock_user_doc.get.return_value = mock_user_snap
         mock_db.collection.return_value.document.return_value = mock_user_doc
 
-        handler = get_callable_handler(main.render_settings_page)
+        handler = get_callable_handler(dev.render_settings_page)
         mock_req = MagicMock()
         mock_req.method = "GET"
         mock_req.cookies = {"__session": "valid_token"}
@@ -417,8 +384,8 @@ class TestJinjaSettingsPageCRUD(unittest.TestCase):
         self.assertIn('value="ghp_secret12345678"', html)
         self.assertIn('value="AIzaSySecretGeminiKey"', html)
 
-    @patch("main.auth.verify_id_token")
-    @patch("main.db")
+    @patch("dev.auth.verify_id_token")
+    @patch("dev.db")
     def test_render_settings_page_post_updates_and_renders_saved(self, mock_db, mock_verify):
         mock_verify.return_value = {"uid": "user_settings_2", "email": "dev2@test.com"}
 
@@ -433,7 +400,7 @@ class TestJinjaSettingsPageCRUD(unittest.TestCase):
         mock_user_doc.get.return_value = mock_user_snap
         mock_db.collection.return_value.document.return_value = mock_user_doc
 
-        handler = get_callable_handler(main.render_settings_page)
+        handler = get_callable_handler(dev.render_settings_page)
         mock_req = MagicMock()
         mock_req.method = "POST"
         mock_req.cookies = {"__session": "valid_token"}

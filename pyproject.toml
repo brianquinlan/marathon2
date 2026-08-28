@@ -64,5 +64,5 @@ ignore = [
 ]
 
 [tool.ruff.lint.isort]
-known-first-party = ["functions", "user", "task", "github_sync", "genai_ranker", "auth_utils", "main"]
+known-first-party = ["functions", "user", "task", "github_sync", "genai_ranker", "auth_utils", "main", "dev"]
 

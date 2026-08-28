@@ -8,17 +8,15 @@ Supports:
 """
 
 import json
-import os
 
 import firebase_admin
-import jinja2
-from firebase_admin import auth
 from firebase_functions import firestore_fn, https_fn, options, scheduler_fn, tasks_fn
 from flask import Response
 from google.cloud import firestore
 from google.cloud.firestore import SERVER_TIMESTAMP
 
 from auth_utils import extract_provider_info, fetch_full_user_auth_record, verify_bearer_token
+from dev import render_main_page, render_settings_page
 from github_sync import (
     enqueue_issue_page_sync,
     enqueue_user_periodic_sync,
@@ -36,272 +34,21 @@ from task import (
 )
 from user import User
 
-# Jinja2 Environment for server-side HTML rendering
-TEMPLATES_DIR = os.path.join(os.path.dirname(__file__), "templates")
-jinja_env = jinja2.Environment(
-    loader=jinja2.FileSystemLoader(TEMPLATES_DIR), autoescape=jinja2.select_autoescape(["html", "xml"])
-)
-
 # Initialize Firebase Admin App if not already initialized
 if not firebase_admin._apps:
     firebase_admin.initialize_app()
 
 db: firestore.Client = firestore.Client()
 
-
-# ============================================================================
-# Jinja2 Server-Rendered Main Page (Static Ranked Tasks)
-# ============================================================================
-
-
-@https_fn.on_request(cors=options.CorsOptions(cors_origins="*", cors_methods=["get", "post", "options"]))
-def render_main_page(req: https_fn.Request) -> Response:
-    """
-    Renders the static ranked tasks list for developer debugging using Jinja2 templates.
-    Authenticates the user via __session cookie, Authorization header, or ?token= param.
-    """
-    if req.method == "OPTIONS":
-        return Response("", status=204)
-
-    token_str = req.cookies.get("__session") or req.args.get("token")
-    if not token_str and req.headers.get("Authorization"):
-        auth_hdr = req.headers.get("Authorization", "")
-        if auth_hdr.startswith("Bearer "):
-            token_str = auth_hdr.split("Bearer ", 1)[1].strip()
-
-    decoded_token = None
-    if token_str:
-        try:
-            decoded_token = auth.verify_id_token(token_str)
-        except Exception:
-            pass
-
-    template = jinja_env.get_template("main.html")
-
-    if not decoded_token:
-        html = template.render(is_authenticated=False, user=None, tasks=[])
-        return Response(html, status=200, headers={"Content-Type": "text/html; charset=utf-8"})
-
-    uid = str(decoded_token.get("uid") or "")
-    # Fetch user details
-    user_doc = db.collection("users").document(uid).get()
-    user_data = user_doc.to_dict() if user_doc.exists else {}
-    if not user_data:
-        user_data = {"uid": uid, "email": decoded_token.get("email"), "display_name": decoded_token.get("name")}
-
-    if req.method == "POST":
-        action = req.form.get("action") if req.form else None
-        if action == "sync":
-            user_model = User.model_validate({**user_data, "uid": uid})
-            if user_model.github_access_token:
-                start_user_github_sync(user=user_model, db=db)
-        else:
-            force_rerank_tasks(uid=uid, db=db)
-
-    # Fetch tasks from users/{uid}/tasks
-    tasks_col = db.collection("users").document(uid).collection("tasks")
-    tasks_docs = tasks_col.stream()
-    tasks_list: list[dict[str, object]] = []
-    unranked_task_ids: list[str] = []
-    for doc in tasks_docs:
-        t_data = doc.to_dict() or {}
-        tasks_list.append(t_data)
-        if t_data.get("priority_needs_updated"):
-            raw_id = doc.id
-            if raw_id:
-                unranked_task_ids.append(str(raw_id))
-
-    # Auto-dispatch ranking for any tasks that need ranking
-    for unranked_id in unranked_task_ids:
-        enqueue_task_ranking(uid=uid, task_id=unranked_id, db=db)
-
-    # Sort descending from highest to lowest priority
-    tasks_list.sort(key=lambda t: float(t.get("priority") or 0.0), reverse=True)  # type: ignore
-
-    html = template.render(is_authenticated=True, user=user_data, tasks=tasks_list)
-    return Response(html, status=200, headers={"Content-Type": "text/html; charset=utf-8"})
-
-
-# ============================================================================
-# Jinja2 Server-Rendered Settings Page (Simple CRUD)
-# ============================================================================
-
-
-@https_fn.on_request(cors=options.CorsOptions(cors_origins="*", cors_methods=["get", "post", "options"]))
-def render_settings_page(req: https_fn.Request) -> Response:
-    """
-    Simple server-side CRUD settings page for configuring GitHub access token and monitored repos.
-    - GET /settings: Renders settings form.
-    - POST /settings: Updates User in Firestore and displays success message.
-    """
-    if req.method == "OPTIONS":
-        return Response("", status=204)
-
-    token_str = req.cookies.get("__session") or req.args.get("token")
-    if not token_str and req.headers.get("Authorization"):
-        auth_hdr = req.headers.get("Authorization", "")
-        if auth_hdr.startswith("Bearer "):
-            token_str = auth_hdr.split("Bearer ", 1)[1].strip()
-
-    decoded_token = None
-    if token_str:
-        try:
-            decoded_token = auth.verify_id_token(token_str)
-        except Exception:
-            pass
-
-    if not decoded_token:
-        # Redirect unauthenticated users to / for login
-        return Response("", status=302, headers={"Location": "/"})
-
-    uid = str(decoded_token.get("uid") or "")
-    user_ref = db.collection("users").document(uid)
-    template = jinja_env.get_template("settings.html")
-
-    if req.method == "POST":
-        new_token = (req.form.get("github_access_token") or "").strip()
-        new_gemini_key = (req.form.get("gemini_api_key") or "").strip()
-        raw_repos = (req.form.get("monitored_repos") or "").strip()
-        repo_names = [r.strip() for r in raw_repos.split(",") if r.strip()]
-
-        doc_snap = user_ref.get()
-        current_data = doc_snap.to_dict() or {}
-        existing_repos_raw = current_data.get("monitored_repos")
-        existing_repos: dict[str, object] = dict(existing_repos_raw) if isinstance(existing_repos_raw, dict) else {}
-        updated_repos: dict[str, object] = {repo: existing_repos.get(repo) for repo in repo_names}
-
-        update_data: dict[str, object] = {
-            "github_access_token": new_token if new_token else None,
-            "gemini_api_key": new_gemini_key if new_gemini_key else None,
-            "monitored_repos": updated_repos,
-            "updated_at": SERVER_TIMESTAMP,
-        }
-
-        user_ref.set(update_data, merge=True)
-
-        doc_snap = user_ref.get()
-        user_data = doc_snap.to_dict() if doc_snap.exists else {"uid": uid}
-
-        html = template.render(user=user_data, saved=True)
-        return Response(html, status=200, headers={"Content-Type": "text/html; charset=utf-8"})
-
-    # GET request: render form with current values
-    doc_snap = user_ref.get()
-    user_data = (
-        doc_snap.to_dict()
-        if doc_snap.exists
-        else {"uid": uid, "email": decoded_token.get("email"), "display_name": decoded_token.get("name")}
-    )
-
-    html = template.render(user=user_data, saved=False)
-    return Response(html, status=200, headers={"Content-Type": "text/html; charset=utf-8"})
+__all__ = [
+    "render_main_page",
+    "render_settings_page",
+]
 
 
 # ============================================================================
 # User Profile Callable Functions
 # ============================================================================
-
-
-@https_fn.on_call(cors=options.CorsOptions(cors_origins="*", cors_methods=["get", "post", "options"]))
-def associate_user_info(req: https_fn.CallableRequest) -> dict[str, object]:
-    """
-    Associates custom information with the authenticated user in Firestore using the User model.
-    Accepts:
-      - github_access_token (optional)
-      - gemini_api_key (optional)
-      - monitored_repos (optional)
-      - custom_data / associated_data (optional)
-    """
-    if not req.auth:
-        raise https_fn.HttpsError(
-            code=https_fn.FunctionsErrorCode.UNAUTHENTICATED,
-            message="User must be authenticated to associate information.",
-        )
-
-    uid = req.auth.uid
-    token = req.auth.token
-    provider_info = extract_provider_info(token)
-
-    # Payload provided by caller
-    payload: dict[str, object] = req.data if isinstance(req.data, dict) else {}
-
-    # Extract user-specific fields
-    raw_token = payload.get("github_access_token")
-    github_access_token = str(raw_token) if raw_token is not None else None
-    raw_key = payload.get("gemini_api_key")
-    gemini_api_key = str(raw_key) if raw_key is not None else None
-    raw_repos = payload.get("monitored_repos")
-    monitored_repos: dict[str, object] | None = dict(raw_repos) if isinstance(raw_repos, dict) else None
-    raw_custom = payload.get("custom_data") or payload.get("associated_data")
-    custom_data = raw_custom if isinstance(raw_custom, dict) else {}
-
-    # Document reference in Firestore
-    user_ref = db.collection("users").document(uid)
-    doc_snap = user_ref.get()
-
-    if doc_snap.exists:
-        raw_user_dict = doc_snap.to_dict() or {}
-        user = User.model_validate({**raw_user_dict, "uid": uid})
-
-        # Update fields if provided
-        if github_access_token is not None:
-            user.github_access_token = github_access_token
-        if gemini_api_key is not None:
-            user.gemini_api_key = gemini_api_key
-        if monitored_repos is not None:
-            from github_sync import _parse_github_datetime
-
-            user.monitored_repos = {str(k): _parse_github_datetime(v) for k, v in monitored_repos.items()}
-        if custom_data:
-            user.custom_data.update(custom_data)
-
-        # Ensure authentication and provider fields stay synced
-        raw_email = token.get("email")
-        if raw_email is not None:
-            user.email = str(raw_email)
-        raw_ver = token.get("email_verified")
-        if raw_ver is not None:
-            user.email_verified = bool(raw_ver)
-        raw_name = token.get("name")
-        if raw_name is not None:
-            user.display_name = str(raw_name)
-        raw_pic = token.get("picture")
-        if raw_pic is not None:
-            user.photo_url = str(raw_pic)
-
-        raw_p = provider_info.get("primary_provider")
-        if raw_p is not None:
-            user.primary_provider = str(raw_p)
-        raw_gid = provider_info.get("google_id")
-        if raw_gid is not None:
-            user.google_id = str(raw_gid)
-        raw_ghid = provider_info.get("github_id")
-        if raw_ghid is not None:
-            user.github_id = str(raw_ghid)
-        raw_lp = provider_info.get("linked_providers")
-        if isinstance(raw_lp, list):
-            user.linked_providers = [str(x) for x in raw_lp]
-
-        action = "updated"
-    else:
-        user = User.from_auth_token(
-            token_dict=token,
-            provider_info=provider_info,
-            github_access_token=github_access_token,
-            monitored_repos=monitored_repos,
-            custom_data=custom_data,
-        )
-        action = "created"
-
-    user_ref.set({**user.model_dump(), "updated_at": SERVER_TIMESTAMP}, merge=True)
-
-    return {
-        "status": "success",
-        "action": action,
-        "uid": uid,
-        "provider": provider_info.get("primary_provider_name"),
-        "user": user.model_dump(mode="json"),
-    }
 
 
 @https_fn.on_call(cors=options.CorsOptions(cors_origins="*", cors_methods=["get", "post", "options"]))
