@@ -86,11 +86,6 @@ def get_user_task_list(req: https_fn.CallableRequest) -> dict[str, object]:
     }
 
 
-# ============================================================================
-# Firebase Task Queue Functions: Issue Pagination
-# ============================================================================
-
-
 @tasks_fn.on_task_dispatched(
     retry_config=options.RetryConfig(max_attempts=3, min_backoff_seconds=10, max_backoff_seconds=300, max_doublings=3),
     rate_limits=options.RateLimits(max_concurrent_dispatches=10, max_dispatches_per_second=10),
@@ -140,11 +135,6 @@ def sync_github_issues_page(req: tasks_fn.CallableRequest) -> None:
     )
 
 
-# ============================================================================
-# Firebase Task Queue Functions: Task Ranking
-# ============================================================================
-
-
 @tasks_fn.on_task_dispatched(
     retry_config=options.RetryConfig(max_attempts=3, min_backoff_seconds=10, max_backoff_seconds=300, max_doublings=3),
     rate_limits=options.RateLimits(max_concurrent_dispatches=5, max_dispatches_per_second=10),
@@ -165,11 +155,6 @@ def rank_user_tasks(req: tasks_fn.CallableRequest) -> None:
         )
 
     update_task_priority(uid=uid, task_id=task_id, db=db)
-
-
-# ============================================================================
-# Scheduled Functions & Task Queue Workers: 20-Minute Periodic User Sync
-# ============================================================================
 
 
 @tasks_fn.on_task_dispatched()
@@ -202,11 +187,6 @@ def periodic_github_sync_scheduler(event: scheduler_fn.ScheduledEvent) -> None:
         raw_user_dict = doc_snap.to_dict() or {}
         if raw_user_dict.get("github_access_token"):
             enqueue_user_periodic_sync(uid=doc_snap.id, db=db)
-
-
-# ============================================================================
-# Cloud Firestore Triggers: Auto-Sync on User Settings Creation or Change
-# ============================================================================
 
 
 @firestore_fn.on_document_written(document="users/{uid}")
@@ -293,11 +273,6 @@ def on_user_settings_changed(
     removed_repos = before_repos - after_repos
     for repo_clean in removed_repos:
         cleanup_repo_tasks(uid=uid, repo_full_name=repo_clean, db=db)
-
-
-# ============================================================================
-# Cloud Firestore Triggers: Task Document Changes & Reranking
-# ============================================================================
 
 
 @firestore_fn.on_document_written(document="users/{uid}/tasks/{task_id}")

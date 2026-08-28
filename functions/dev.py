@@ -32,11 +32,6 @@ if not firebase_admin._apps:
 db: firestore.Client = firestore.Client()
 
 
-# ============================================================================
-# Jinja2 Server-Rendered Main Page (Static Ranked Tasks)
-# ============================================================================
-
-
 @https_fn.on_request(cors=options.CorsOptions(cors_origins="*", cors_methods=["get", "post", "options"]))
 def render_main_page(req: https_fn.Request) -> Response:
     """
