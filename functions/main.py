@@ -7,15 +7,10 @@ Supports:
 2. Task prioritization and asynchronous ranking lifecycle via Task Queue Functions
 """
 
-import json
-
 import firebase_admin
 from firebase_functions import firestore_fn, https_fn, options, scheduler_fn, tasks_fn
-from flask import Response
 from google.cloud import firestore
-from google.cloud.firestore import SERVER_TIMESTAMP
 
-from auth_utils import extract_provider_info, verify_bearer_token
 from dev import render_main_page, render_settings_page
 from github_sync import (
     enqueue_issue_page_sync,
@@ -168,110 +163,6 @@ def rank_user_tasks(req: tasks_fn.CallableRequest) -> None:
         )
 
     update_task_priority(uid=uid, task_id=task_id, db=db)
-
-
-@https_fn.on_request(cors=options.CorsOptions(cors_origins="*", cors_methods=["get", "post", "delete", "options"]))
-def user_api(req: https_fn.Request) -> Response:
-    """
-    RESTful endpoint:
-    - GET /: Returns User data.
-    - POST /: Associates/updates User information.
-    - DELETE /: Deletes User document.
-    Requires header: 'Authorization: Bearer <ID_TOKEN>'.
-    """
-    if req.method == "OPTIONS":
-        return Response("", status=204)
-
-    auth_header = req.headers.get("Authorization")
-    try:
-        decoded_token = verify_bearer_token(auth_header)
-    except https_fn.HttpsError as e:
-        return Response(json.dumps({"error": e.message}), status=401, headers={"Content-Type": "application/json"})
-
-    uid = str(decoded_token.get("uid") or "")
-    provider_info = extract_provider_info(decoded_token)
-    user_ref = db.collection("users").document(uid)
-
-    if req.method == "GET":
-        doc_snap = user_ref.get()
-        if doc_snap.exists:
-            raw_user_dict = doc_snap.to_dict() or {}
-            user = User.model_validate({**raw_user_dict, "uid": uid})
-        else:
-            user = User.from_auth_token(decoded_token, provider_info)
-
-        return Response(
-            json.dumps(
-                {
-                    "status": "success",
-                    "uid": uid,
-                    "provider": provider_info.get("primary_provider_name"),
-                    "user": user.model_dump(mode="json"),
-                },
-                default=str,
-            ),
-            status=200,
-            headers={"Content-Type": "application/json"},
-        )
-
-    elif req.method == "POST":
-        try:
-            body: dict[str, object] = req.get_json(silent=True) or {}
-        except Exception:
-            body = {}
-
-        doc_snap = user_ref.get()
-        if doc_snap.exists:
-            raw_user_dict = doc_snap.to_dict() or {}
-            user = User.model_validate({**raw_user_dict, "uid": uid})
-        else:
-            user = User.from_auth_token(decoded_token, provider_info)
-
-        if "github_access_token" in body:
-            user.github_access_token = (
-                str(body["github_access_token"]) if body["github_access_token"] is not None else None
-            )
-        if "monitored_repos" in body:
-            raw_mr = body.get("monitored_repos")
-            if isinstance(raw_mr, dict):
-                from github_sync import _parse_github_datetime
-
-                user.monitored_repos = {str(k): _parse_github_datetime(v) for k, v in raw_mr.items()}
-        if "custom_data" in body:
-            raw_cd = body.get("custom_data")
-            if isinstance(raw_cd, dict):
-                user.custom_data.update(raw_cd)
-        elif "associated_data" in body:
-            raw_ad = body.get("associated_data")
-            if isinstance(raw_ad, dict):
-                user.custom_data.update(raw_ad)
-
-        user_ref.set({**user.model_dump(), "updated_at": SERVER_TIMESTAMP}, merge=True)
-        return Response(
-            json.dumps(
-                {
-                    "status": "success",
-                    "message": "User data updated successfully.",
-                    "user": user.model_dump(mode="json"),
-                }
-            ),
-            status=200,
-            headers={"Content-Type": "application/json"},
-        )
-
-    elif req.method == "DELETE":
-        user_ref.delete()
-        return Response(
-            json.dumps({"status": "success", "message": f"User document for UID {uid} deleted."}),
-            status=200,
-            headers={"Content-Type": "application/json"},
-        )
-
-    return Response(
-        json.dumps({"error": f"Method {req.method} not allowed."}),
-        status=405,
-        headers={"Content-Type": "application/json"},
-    )
 
 
 # ============================================================================
