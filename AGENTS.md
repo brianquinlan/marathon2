@@ -21,8 +21,7 @@ marathon2/
 │   ├── github_sync.py       # PyGithub client, in-memory issue fetcher, pagination sync
 │   ├── genai_ranker.py      # Pydantic AI task priority ranker (synchronous run_sync)
 │   ├── task.py              # Task Pydantic model & Firestore task operations
-│   ├── user.py              # User Pydantic model & auth token extraction
-│   └── auth_utils.py        # Token verification & OAuth provider parsing
+│   └── user.py              # User Pydantic model & Firestore profile schema
 ├── test_backend.py          # Auth & callable endpoint tests
 ├── test_github.py           # GitHub sync & pagination tests
 ├── test_task.py             # Task lifecycle & Pydantic AI ranking tests

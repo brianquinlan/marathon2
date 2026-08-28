@@ -13,7 +13,6 @@ from firebase_functions import https_fn, tasks_fn
 
 import dev
 import main
-from auth_utils import extract_provider_info
 from user import User
 
 
@@ -103,27 +102,6 @@ class TestUserModel(unittest.TestCase):
 
         json_str = user.model_dump_json()
         self.assertIn('"created_at":"2026-08-23T10:00:00Z"', json_str.replace("+00:00", "Z"))
-
-
-class TestAuthProviderExtraction(unittest.TestCase):
-    def test_extract_google_provider_info(self):
-        token = {
-            "uid": "google-user-123",
-            "email": "alex@gmail.com",
-            "email_verified": True,
-            "name": "Alex Developer",
-            "picture": "https://lh3.googleusercontent.com/a/sample",
-            "firebase": {
-                "sign_in_provider": "google.com",
-                "identities": {"google.com": ["google-sub-id-987"], "email": ["alex@gmail.com"]},
-            },
-        }
-
-        info = extract_provider_info(token)
-        self.assertEqual(info["primary_provider"], "google.com")
-        self.assertEqual(info["primary_provider_name"], "Google")
-        self.assertTrue(info["is_google"])
-        self.assertFalse(info["is_github"])
 
 
 class TestCallableFunctionLogic(unittest.TestCase):

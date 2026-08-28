@@ -1,4 +1,3 @@
-from collections.abc import Mapping
 from datetime import datetime
 
 from pydantic import BaseModel, ConfigDict, Field
@@ -33,59 +32,3 @@ class User(BaseModel):
     # Timestamps
     created_at: datetime | None = None
     updated_at: datetime | None = None
-
-    @classmethod
-    def from_auth_token(
-        cls,
-        token_dict: dict[str, object],
-        provider_info: dict[str, object],
-        github_access_token: str | None = None,
-        last_assigned_sync: datetime | None = None,
-        last_mentioned_sync: datetime | None = None,
-        last_created_sync: datetime | None = None,
-        monitored_repos: Mapping[str, object] | None = None,
-        custom_data: dict[str, object] | None = None,
-    ) -> "User":
-        """
-        Creates a User dataclass instance populated with authentication claims from a decoded Firebase ID token.
-        """
-        raw_linked = provider_info.get("linked_providers")
-        linked_list: list[str] = [str(x) for x in raw_linked] if isinstance(raw_linked, list) else []
-
-        raw_verified = token_dict.get("email_verified")
-        email_verified = bool(raw_verified) if raw_verified is not None else False
-
-        raw_uid = token_dict.get("uid")
-        raw_email = token_dict.get("email")
-        raw_name = token_dict.get("name")
-        raw_pic = token_dict.get("picture")
-        raw_provider = provider_info.get("primary_provider")
-        raw_google_id = provider_info.get("google_id")
-        raw_github_id = provider_info.get("github_id")
-
-        repos_dict: dict[str, datetime | None] = {}
-        if monitored_repos:
-            from github_sync import _parse_github_datetime
-
-            repos_dict = {
-                str(k): (v if isinstance(v, datetime) else _parse_github_datetime(v))
-                for k, v in monitored_repos.items()
-            }
-
-        return cls(
-            uid=str(raw_uid) if raw_uid is not None else None,
-            email=str(raw_email) if raw_email is not None else None,
-            email_verified=email_verified,
-            display_name=str(raw_name) if raw_name is not None else None,
-            photo_url=str(raw_pic) if raw_pic is not None else None,
-            primary_provider=str(raw_provider) if raw_provider is not None else None,
-            google_id=str(raw_google_id) if raw_google_id is not None else None,
-            github_id=str(raw_github_id) if raw_github_id is not None else None,
-            linked_providers=linked_list,
-            github_access_token=github_access_token,
-            last_assigned_sync=last_assigned_sync,
-            last_mentioned_sync=last_mentioned_sync,
-            last_created_sync=last_created_sync,
-            monitored_repos=repos_dict,
-            custom_data=custom_data or {},
-        )

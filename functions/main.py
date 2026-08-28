@@ -40,6 +40,7 @@ __all__ = [
     "render_settings_page",
 ]
 
+
 @https_fn.on_call(cors=options.CorsOptions(cors_origins="*", cors_methods=["get", "post", "options"]))
 def force_rerank_all_tasks(req: https_fn.CallableRequest) -> dict[str, object]:
     """
@@ -83,6 +84,7 @@ def get_user_task_list(req: https_fn.CallableRequest) -> dict[str, object]:
         "count": len(tasks),
         "tasks": tasks,
     }
+
 
 # ============================================================================
 # Firebase Task Queue Functions: Issue Pagination
