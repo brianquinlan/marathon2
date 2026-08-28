@@ -45,6 +45,49 @@ __all__ = [
     "render_settings_page",
 ]
 
+@https_fn.on_call(cors=options.CorsOptions(cors_origins="*", cors_methods=["get", "post", "options"]))
+def force_rerank_all_tasks(req: https_fn.CallableRequest) -> dict[str, object]:
+    """
+    Forces all tasks for the authenticated user to be reranked:
+    Sets priority_needs_updated = True on all tasks and enqueues the ranker.
+    """
+    if not req.auth or not req.auth.uid:
+        raise https_fn.HttpsError(
+            code=https_fn.FunctionsErrorCode.UNAUTHENTICATED,
+            message="User must be authenticated to force rerank tasks.",
+        )
+
+    uid = str(req.auth.uid)
+    try:
+        result = force_rerank_tasks(uid=uid, db=db)
+        return result
+    except Exception as e:
+        raise https_fn.HttpsError(
+            code=https_fn.FunctionsErrorCode.INTERNAL, message=f"Failed to force rerank tasks: {e!s}"
+        ) from e
+
+
+@https_fn.on_call(cors=options.CorsOptions(cors_origins="*", cors_methods=["get", "post", "options"]))
+def get_user_task_list(req: https_fn.CallableRequest) -> dict[str, object]:
+    """
+    Retrieves all tasks for the authenticated user from Firestore under users/{uid}/tasks.
+    """
+    if not req.auth or not req.auth.uid:
+        raise https_fn.HttpsError(
+            code=https_fn.FunctionsErrorCode.UNAUTHENTICATED, message="User must be authenticated to retrieve tasks."
+        )
+
+    uid = str(req.auth.uid)
+    payload: dict[str, object] = req.data if isinstance(req.data, dict) else {}
+    raw_lim = payload.get("limit", 100)
+    limit = int(raw_lim) if isinstance(raw_lim, (int, str)) and str(raw_lim).isdigit() else 100
+
+    tasks = get_user_tasks(uid=uid, db=db, limit=limit)
+    return {
+        "status": "success",
+        "count": len(tasks),
+        "tasks": tasks,
+    }
 
 # ============================================================================
 # Firebase Task Queue Functions: Issue Pagination
@@ -125,61 +168,6 @@ def rank_user_tasks(req: tasks_fn.CallableRequest) -> None:
         )
 
     update_task_priority(uid=uid, task_id=task_id, db=db)
-
-
-# ============================================================================
-# Task & Priority Ranking Callable Functions
-# ============================================================================
-
-
-@https_fn.on_call(cors=options.CorsOptions(cors_origins="*", cors_methods=["get", "post", "options"]))
-def force_rerank_all_tasks(req: https_fn.CallableRequest) -> dict[str, object]:
-    """
-    Forces all tasks for the authenticated user to be reranked:
-    Sets priority_needs_updated = True on all tasks and enqueues the ranker.
-    """
-    if not req.auth or not req.auth.uid:
-        raise https_fn.HttpsError(
-            code=https_fn.FunctionsErrorCode.UNAUTHENTICATED,
-            message="User must be authenticated to force rerank tasks.",
-        )
-
-    uid = str(req.auth.uid)
-    try:
-        result = force_rerank_tasks(uid=uid, db=db)
-        return result
-    except Exception as e:
-        raise https_fn.HttpsError(
-            code=https_fn.FunctionsErrorCode.INTERNAL, message=f"Failed to force rerank tasks: {e!s}"
-        ) from e
-
-
-@https_fn.on_call(cors=options.CorsOptions(cors_origins="*", cors_methods=["get", "post", "options"]))
-def get_user_task_list(req: https_fn.CallableRequest) -> dict[str, object]:
-    """
-    Retrieves all tasks for the authenticated user from Firestore under users/{uid}/tasks.
-    """
-    if not req.auth or not req.auth.uid:
-        raise https_fn.HttpsError(
-            code=https_fn.FunctionsErrorCode.UNAUTHENTICATED, message="User must be authenticated to retrieve tasks."
-        )
-
-    uid = str(req.auth.uid)
-    payload: dict[str, object] = req.data if isinstance(req.data, dict) else {}
-    raw_lim = payload.get("limit", 100)
-    limit = int(raw_lim) if isinstance(raw_lim, (int, str)) and str(raw_lim).isdigit() else 100
-
-    tasks = get_user_tasks(uid=uid, db=db, limit=limit)
-    return {
-        "status": "success",
-        "count": len(tasks),
-        "tasks": tasks,
-    }
-
-
-# ============================================================================
-# HTTP REST API Function
-# ============================================================================
 
 
 @https_fn.on_request(cors=options.CorsOptions(cors_origins="*", cors_methods=["get", "post", "delete", "options"]))
