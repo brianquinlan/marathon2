@@ -550,11 +550,15 @@ class TestTaskLifecycleAndSourceTracking(unittest.TestCase):
         self.assertFalse(res)
         mock_task_ref.delete.assert_not_called()
 
-    @patch("task.enqueue_task_ranking")
-    def test_mark_all_tasks_for_reranking(self, mock_enqueue):
+    def test_mark_all_tasks_for_reranking(self):
         mock_db = MagicMock()
+        mock_user_doc = MagicMock()
         mock_tasks_col = MagicMock()
-        mock_db.collection.return_value.document.return_value.collection.return_value = mock_tasks_col
+        mock_batch = MagicMock()
+
+        mock_db.collection.return_value.document.return_value = mock_user_doc
+        mock_user_doc.collection.return_value = mock_tasks_col
+        mock_db.batch.return_value = mock_batch
 
         doc1 = MagicMock()
         doc1.id = "task_doc_1"
@@ -562,11 +566,12 @@ class TestTaskLifecycleAndSourceTracking(unittest.TestCase):
 
         count = mark_all_tasks_for_reranking("user_rerank_1", mock_db)
         self.assertEqual(count, 1)
-        doc1.reference.set.assert_called_once_with(
+        mock_batch.set.assert_called_once_with(
+            doc1.reference,
             {"priority_needs_updated": True, "updated_at": ANY},
             merge=True,
         )
-        mock_enqueue.assert_called_once_with(uid="user_rerank_1", task_id="task_doc_1", db=mock_db)
+        mock_batch.commit.assert_called_once()
 
     def test_cleanup_repo_tasks_deletes_monitored_only_tasks(self):
         mock_db = MagicMock()
