@@ -43,10 +43,6 @@ __all__ = [
 
 @https_fn.on_call(cors=options.CorsOptions(cors_origins="*", cors_methods=["get", "post", "options"]))
 def force_rerank_all_tasks(req: https_fn.CallableRequest) -> dict[str, object]:
-    """
-    Forces all tasks for the authenticated user to be reranked:
-    Sets priority_needs_updated = True on all tasks and enqueues the ranker.
-    """
     if not req.auth or not req.auth.uid:
         raise https_fn.HttpsError(
             code=https_fn.FunctionsErrorCode.UNAUTHENTICATED,
@@ -65,9 +61,6 @@ def force_rerank_all_tasks(req: https_fn.CallableRequest) -> dict[str, object]:
 
 @https_fn.on_call(cors=options.CorsOptions(cors_origins="*", cors_methods=["get", "post", "options"]))
 def get_user_task_list(req: https_fn.CallableRequest) -> dict[str, object]:
-    """
-    Retrieves all tasks for the authenticated user from Firestore under users/{uid}/tasks.
-    """
     if not req.auth or not req.auth.uid:
         raise https_fn.HttpsError(
             code=https_fn.FunctionsErrorCode.UNAUTHENTICATED, message="User must be authenticated to retrieve tasks."
@@ -91,10 +84,6 @@ def get_user_task_list(req: https_fn.CallableRequest) -> dict[str, object]:
     rate_limits=options.RateLimits(max_concurrent_dispatches=10, max_dispatches_per_second=10),
 )
 def sync_github_issues_page(req: tasks_fn.CallableRequest) -> None:
-    """
-    Processes one page of GitHub issues for a given user, updates Tasks in Firestore,
-    and chains to the next page if available.
-    """
     data: dict[str, object] = req.data if isinstance(req.data, dict) else {}
     raw_uid = data.get("uid")
     uid = str(raw_uid) if raw_uid is not None else None
@@ -140,10 +129,6 @@ def sync_github_issues_page(req: tasks_fn.CallableRequest) -> None:
     rate_limits=options.RateLimits(max_concurrent_dispatches=5, max_dispatches_per_second=10),
 )
 def rank_user_tasks(req: tasks_fn.CallableRequest) -> None:
-    """
-    Firebase Task Queue function for asynchronous ranking of a single task.
-    Dispatched via Cloud Tasks when a task's priority needs update.
-    """
     data: dict[str, object] = req.data if isinstance(req.data, dict) else {}
     raw_uid = data.get("uid")
     uid = str(raw_uid) if raw_uid is not None else None
@@ -159,10 +144,6 @@ def rank_user_tasks(req: tasks_fn.CallableRequest) -> None:
 
 @tasks_fn.on_task_dispatched()
 def sync_user_periodic_task(req: tasks_fn.CallableRequest) -> None:
-    """
-    Task Queue worker that runs the 20-minute periodic sync for a single user,
-    purging closed tasks and syncing updated/new open issues.
-    """
     payload = req.data if isinstance(req.data, dict) else {}
     uid = payload.get("uid")
     if not uid:
@@ -175,11 +156,6 @@ def sync_user_periodic_task(req: tasks_fn.CallableRequest) -> None:
 
 @scheduler_fn.on_schedule(schedule="every 20 minutes", retry_count=1)
 def periodic_github_sync_scheduler(event: scheduler_fn.ScheduledEvent) -> None:
-    """
-    Scheduled Cloud Function that runs every 20 minutes.
-    Sweeps all users in Firestore and enqueues individual user periodic sync jobs
-    for users with an active GitHub access token.
-    """
     users_col = db.collection("users")
     users_docs = users_col.stream()
 
@@ -193,13 +169,6 @@ def periodic_github_sync_scheduler(event: scheduler_fn.ScheduledEvent) -> None:
 def on_user_settings_changed(
     event: firestore_fn.Event[firestore_fn.Change[firestore_fn.DocumentSnapshot | None]],
 ) -> None:
-    """
-    Cloud Firestore trigger that handles targeted lifecycle actions when user settings change:
-    1. If GitHub access token changes (or is newly added): discard all tasks and perform a full sync.
-    2. If Gemini API key changes: mark every task as needing re-ranked and enqueue ranking.
-    3. If new repo(s) added: enqueue sync task for only the newly added repo(s).
-    4. If repo(s) removed: cleanup tasks associated with removed repo(s) (preserving tasks with other sources).
-    """
     if event.data is None or event.data.after is None:
         return
 
@@ -277,10 +246,6 @@ def on_user_settings_changed(
 
 @firestore_fn.on_document_written(document="users/{uid}/tasks/{task_id}")
 def on_task_written(event: firestore_fn.Event[firestore_fn.Change[firestore_fn.DocumentSnapshot | None]]) -> None:
-    """
-    Cloud Firestore trigger that monitors for changes to Task documents and triggers reranking
-    whenever a task is newly created or updated with priority_needs_updated == True.
-    """
     uid = event.params.get("uid")
     task_id = event.params.get("task_id")
 
